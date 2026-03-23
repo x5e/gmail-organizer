@@ -1,9 +1,11 @@
 -- Migration 001: Initial schema
 --
--- Creates the three core tables needed by the Gmail Organizer MCP connector:
---   users         — one row per connected Google account
---   oauth_tokens  — encrypted refresh token + cached access token per user
---   oauth_state   — short-lived PKCE state rows (created at auth start, deleted after callback)
+-- Creates the core tables needed by the Gmail Organizer MCP connector:
+--   users              — one row per connected Google account
+--   oauth_tokens       — encrypted refresh token + cached access token per user
+--   oauth_state        — short-lived PKCE state rows (created at auth start, deleted after callback)
+--   bearer_tokens      — hashed bearer tokens for API authentication (append-only)
+--   token_revocations  — records of revoked bearer tokens (append-only)
 --
 -- Also creates the schema_migrations table used by the migration runner itself.
 
@@ -14,8 +16,11 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 
 -- One row per user who has connected their Gmail account.
+-- The email column is the user's Gmail address (obtained via OpenID Connect
+-- during OAuth) and serves as the natural key for deduplication.
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email TEXT UNIQUE NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -40,4 +45,21 @@ CREATE TABLE IF NOT EXISTS oauth_state (
   state TEXT PRIMARY KEY,
   code_verifier TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Hashed bearer tokens used to authenticate MCP API requests.
+-- Only the SHA-256 hash of the token is stored; the plaintext is returned to
+-- the client once at OAuth completion and never persisted.
+-- This table is append-only: rows are never updated or deleted.
+CREATE TABLE IF NOT EXISTS bearer_tokens (
+  token_hash TEXT PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Records of manually revoked bearer tokens.
+-- This table is append-only: to revoke a token, insert a row here.
+CREATE TABLE IF NOT EXISTS token_revocations (
+  token_hash TEXT PRIMARY KEY REFERENCES bearer_tokens(token_hash),
+  revoked_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

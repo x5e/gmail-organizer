@@ -15,10 +15,12 @@
  *   // use accessToken for Gmail API calls
  */
 
+import { createHash, randomBytes } from "node:crypto";
 import { config } from "../config.js";
 import { encrypt, decrypt } from "../crypto.js";
 import {
-  createUser,
+  findOrCreateUserByEmail,
+  insertBearerToken,
   upsertOAuthTokens,
   updateAccessToken,
   getOAuthTokens,
@@ -35,8 +37,31 @@ export interface TokenResponse {
   access_token: string;
   expires_in: number;
   refresh_token?: string;
+  id_token?: string;
   token_type: string;
   scope?: string;
+}
+
+export interface ExchangeResult {
+  userId: string;
+  bearerToken: string;
+}
+
+/**
+ * Decodes the payload section of a JWT without signature verification.
+ * Safe here because we received the token directly from Google's token
+ * endpoint over HTTPS — the TLS connection already authenticates the issuer.
+ */
+function decodeIdTokenPayload(idToken: string): { email?: string; email_verified?: boolean } {
+  const parts = idToken.split(".");
+  if (parts.length !== 3) throw new Error("Malformed id_token: expected 3 parts");
+  const payload = Buffer.from(parts[1]!, "base64url").toString("utf8");
+  return JSON.parse(payload);
+}
+
+/** SHA-256 hash a string and return the hex digest. */
+export function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
 }
 
 /**
@@ -45,7 +70,11 @@ export interface TokenResponse {
  *
  * Called from the OAuth callback handler after Google redirects back with `code`.
  *
- * @returns The new user ID (UUID) created for this connected account.
+ * 1. Exchanges the code for Google tokens (including id_token with email).
+ * 2. Extracts the user's email from the id_token.
+ * 3. Finds or creates the user by email.
+ * 4. Stores encrypted OAuth credentials (upsert handles re-authentication).
+ * 5. Mints a high-entropy bearer token, stores its hash, and returns the plaintext.
  */
 export async function exchangeCodeForTokens(
   db: postgres.Sql,
@@ -54,7 +83,7 @@ export async function exchangeCodeForTokens(
     codeVerifier,
     redirectUri,
   }: { code: string; codeVerifier: string; redirectUri: string }
-): Promise<string> {
+): Promise<ExchangeResult> {
   const params = new URLSearchParams({
     grant_type: "authorization_code",
     client_id: config.googleClientId,
@@ -84,8 +113,20 @@ export async function exchangeCodeForTokens(
     );
   }
 
-  // Create user record and store encrypted tokens.
-  const userId = await createUser(db);
+  if (!tokens.id_token) {
+    throw new Error(
+      "Google did not return an id_token. " +
+        "Ensure openid and email scopes are requested."
+    );
+  }
+
+  const idPayload = decodeIdTokenPayload(tokens.id_token);
+  if (!idPayload.email) {
+    throw new Error("id_token does not contain an email claim.");
+  }
+
+  const userId = await findOrCreateUserByEmail(db, idPayload.email);
+
   const encryptedRefreshToken = encrypt(
     tokens.refresh_token,
     config.tokenEncryptionKey
@@ -99,7 +140,10 @@ export async function exchangeCodeForTokens(
     accessTokenExpiresAt: expiresAt,
   });
 
-  return userId;
+  const bearerToken = randomBytes(32).toString("base64url");
+  await insertBearerToken(db, { tokenHash: hashToken(bearerToken), userId });
+
+  return { userId, bearerToken };
 }
 
 /**

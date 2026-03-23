@@ -8,17 +8,16 @@
  *   GET /oauth/callback   — Receives the authorization code; exchanges it for tokens.
  *
  * Flow summary:
- *   1. Claude redirects the user to GET /oauth/authorize.
+ *   1. The MCP client redirects the user to GET /oauth/authorize.
  *   2. The handler generates a PKCE code_verifier + code_challenge and a CSRF
  *      state value, stores them in the oauth_state table, and redirects the
  *      user to Google's OAuth consent screen.
  *   3. Google redirects to GET /oauth/callback with `code` and `state`.
  *   4. The handler validates the state (CSRF check), retrieves the code_verifier,
- *      exchanges the code for tokens, creates a user record, and stores the
- *      encrypted refresh token.
- *   5. The handler returns a JSON response indicating success. Claude reads the
- *      user ID from the response and uses it as the bearer token for future
- *      MCP requests.
+ *      exchanges the code for tokens, finds or creates the user by email, and
+ *      stores the encrypted refresh token.
+ *   5. The handler mints a high-entropy bearer token, stores its hash in the
+ *      database, and returns the plaintext token to the client.
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
@@ -31,8 +30,8 @@ import { sql } from "../db/index.js";
 /** Google's OAuth 2.0 authorization endpoint. */
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 
-/** Gmail modify scope — the only scope this connector requests. */
-const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
+/** OAuth scopes: Gmail modify for inbox operations, openid+email for user identity. */
+const OAUTH_SCOPES = "https://www.googleapis.com/auth/gmail.modify openid email";
 
 /**
  * Generates a cryptographically random PKCE code verifier (43-128 chars,
@@ -71,7 +70,7 @@ export async function registerOAuthRoutes(app: FastifyInstance): Promise<void> {
       client_id: config.googleClientId,
       redirect_uri: config.oauthCallbackUrl,
       response_type: "code",
-      scope: GMAIL_SCOPE,
+      scope: OAUTH_SCOPES,
       access_type: "offline",
       prompt: "consent", // always request refresh token
       state,
@@ -128,7 +127,7 @@ export async function registerOAuthRoutes(app: FastifyInstance): Promise<void> {
       }
 
       try {
-        const userId = await exchangeCodeForTokens(sql, {
+        const { userId, bearerToken } = await exchangeCodeForTokens(sql, {
           code,
           codeVerifier: stateRow.codeVerifier,
           redirectUri: config.oauthCallbackUrl,
@@ -136,13 +135,13 @@ export async function registerOAuthRoutes(app: FastifyInstance): Promise<void> {
 
         app.log.info({ userId }, "OAuth flow completed; user connected");
 
-        // Return the user ID as a bearer token for subsequent MCP requests.
         return reply.send({
           success: true,
-          userId,
+          token: bearerToken,
           message:
             "Gmail account connected successfully. " +
-            "Use the userId as your bearer token for MCP requests.",
+            "Use the token as your Bearer token for MCP requests: " +
+            "Authorization: Bearer <token>",
         });
       } catch (err) {
         app.log.error({ err }, "Token exchange failed");

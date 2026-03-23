@@ -26,6 +26,7 @@ import { sql, closeDb } from "./db/index.js";
 import { runMigrations } from "./db/migrate.js";
 import { registerOAuthRoutes } from "./oauth/handlers.js";
 import { createMcpRequestHandler } from "./mcp.js";
+import { hashToken } from "./oauth/tokens.js";
 
 /** Builds the Fastify application (without starting it). Exported for testing. */
 export async function buildApp() {
@@ -45,8 +46,8 @@ export async function buildApp() {
   // ─── Plugins ────────────────────────────────────────────────────────────────
 
   await app.register(cors, {
-    // Only accept MCP requests from Claude's infrastructure.
-    // In production, restrict this to Claude's actual domain.
+    // Set ALLOWED_ORIGIN to restrict which domains can make requests.
+    // Defaults to allowing all origins; set to your MCP client's domain in production.
     origin: process.env["ALLOWED_ORIGIN"] ?? true,
     methods: ["GET", "POST", "OPTIONS"],
   });
@@ -55,9 +56,13 @@ export async function buildApp() {
     max: 100, // requests
     timeWindow: "1 minute",
     keyGenerator: (request) => {
-      // Rate-limit per user ID (from Authorization header).
+      // Rate-limit by the hash of the bearer token so that the raw token is
+      // never stored in the rate-limiter's in-memory map.
       const auth = request.headers.authorization ?? "";
-      return auth.startsWith("Bearer ") ? auth.slice(7) : request.ip;
+      if (auth.startsWith("Bearer ")) {
+        return hashToken(auth.slice(7));
+      }
+      return request.ip;
     },
   });
 

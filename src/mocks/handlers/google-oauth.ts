@@ -13,6 +13,26 @@ import { http, HttpResponse } from "msw";
 export const MOCK_ACCESS_TOKEN = "mock-access-token-xyz";
 export const MOCK_REFRESH_TOKEN = "mock-refresh-token-abc";
 export const MOCK_NEW_ACCESS_TOKEN = "mock-refreshed-access-token-xyz";
+export const MOCK_USER_EMAIL = "testuser@example.com";
+
+/**
+ * Builds a minimal unsigned JWT id_token with the given email claim.
+ * Only the payload section is meaningful; header and signature are placeholders.
+ */
+function buildMockIdToken(email: string): string {
+  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({
+    iss: "https://accounts.google.com",
+    sub: "1234567890",
+    email,
+    email_verified: true,
+    aud: "mock-client-id",
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  })).toString("base64url");
+  const signature = Buffer.from("mock-signature").toString("base64url");
+  return `${header}.${payload}.${signature}`;
+}
 
 export const googleOAuthHandlers = [
   /** POST https://oauth2.googleapis.com/token — token exchange / refresh. */
@@ -33,8 +53,9 @@ export const googleOAuthHandlers = [
         access_token: MOCK_ACCESS_TOKEN,
         expires_in: 3600,
         refresh_token: MOCK_REFRESH_TOKEN,
+        id_token: buildMockIdToken(MOCK_USER_EMAIL),
         token_type: "Bearer",
-        scope: "https://www.googleapis.com/auth/gmail.modify",
+        scope: "https://www.googleapis.com/auth/gmail.modify openid email",
       });
     }
 
@@ -50,7 +71,7 @@ export const googleOAuthHandlers = [
         access_token: MOCK_NEW_ACCESS_TOKEN,
         expires_in: 3600,
         token_type: "Bearer",
-        scope: "https://www.googleapis.com/auth/gmail.modify",
+        scope: "https://www.googleapis.com/auth/gmail.modify openid email",
       });
     }
 
