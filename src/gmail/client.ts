@@ -247,12 +247,21 @@ export async function getMessage(
 /**
  * Recursively decodes base64url-encoded body data in message parts.
  * Mutates the payload tree in place.
+ *
+ * - text/* parts: decoded to a UTF-8 string (human-readable).
+ * - All other MIME types: converted from base64url to standard base64 and
+ *   stored as-is (no byte→string interpretation). This avoids corrupting
+ *   binary content such as PDFs, images, and Office documents.
  */
 function decodeMessageParts(part?: GmailMessagePart): void {
   if (!part) return;
 
   if (part.body?.data) {
-    part.body.data = decodeBase64Url(part.body.data);
+    if (part.mimeType?.startsWith("text/")) {
+      part.body.data = decodeBase64Url(part.body.data);
+    } else {
+      part.body.data = base64UrlToBase64(part.body.data);
+    }
   }
 
   if (part.parts) {
@@ -264,11 +273,20 @@ function decodeMessageParts(part?: GmailMessagePart): void {
 
 /**
  * Decodes a base64url string to UTF-8.
+ * Only use this for known text/* content; binary data must use base64UrlToBase64.
  */
 export function decodeBase64Url(encoded: string): string {
   // base64url uses - and _ instead of + and /
   const base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
   return Buffer.from(base64, "base64").toString("utf8");
+}
+
+/**
+ * Converts a base64url string to standard base64 without decoding to bytes.
+ * Safe for binary content because no UTF-8 interpretation occurs.
+ */
+export function base64UrlToBase64(encoded: string): string {
+  return encoded.replace(/-/g, "+").replace(/_/g, "/");
 }
 
 /**
@@ -354,12 +372,18 @@ export async function listThreads(
 
 /**
  * Retrieves the full content of a thread including all messages.
+ * Applies the same base64url body decoding to each message as getMessage does,
+ * so text parts are readable UTF-8 and binary parts are safe base64 strings.
  */
 export async function getThread(
   accessToken: string,
   threadId: string
 ): Promise<GmailThread> {
-  return gmailGet<GmailThread>(accessToken, `/threads/${threadId}`);
+  const thread = await gmailGet<GmailThread>(accessToken, `/threads/${threadId}`);
+  for (const message of thread.messages ?? []) {
+    decodeMessageParts(message.payload);
+  }
+  return thread;
 }
 
 /**

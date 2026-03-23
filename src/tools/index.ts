@@ -38,6 +38,23 @@ import { GmailApiError } from "../gmail/client.js";
 const BATCH_MODIFY_MAX = 1000;
 
 /**
+ * Recursively searches a MIME part tree for the part whose body.attachmentId
+ * matches the given ID and returns its mimeType.
+ */
+function findPartMimeType(
+  part: gmail.GmailMessagePart | undefined,
+  attachmentId: string
+): string | undefined {
+  if (!part) return undefined;
+  if (part.body?.attachmentId === attachmentId) return part.mimeType;
+  for (const subPart of part.parts ?? []) {
+    const found = findPartMimeType(subPart, attachmentId);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/**
  * Wraps a tool handler to provide consistent error handling and logging.
  * Converts GmailApiError and generic errors into MCP-compatible error responses.
  */
@@ -256,29 +273,43 @@ export function registerTools(
       const userId = getUserId();
       const accessToken = await getValidAccessToken(db, userId);
       try {
-        const attachment = await gmail.getAttachment(
-          accessToken,
-          messageId,
-          attachmentId
-        );
+        const [attachment, message] = await Promise.all([
+          gmail.getAttachment(accessToken, messageId, attachmentId),
+          gmail.getMessage(accessToken, messageId, "full"),
+        ]);
 
-        // Decode the base64url-encoded data and potentially truncate.
-        const rawData = attachment.data ?? "";
-        const decoded = Buffer.from(
-          rawData.replace(/-/g, "+").replace(/_/g, "/"),
-          "base64"
-        );
+        // Resolve the MIME type from the message's part tree.
+        const mimeType =
+          findPartMimeType(message.payload, attachmentId) ??
+          "application/octet-stream";
+
+        // Convert base64url → standard base64 (swap - and _ back to + and /).
+        const base64 = (attachment.data ?? "").replace(/-/g, "+").replace(/_/g, "/");
+        const decoded = Buffer.from(base64, "base64");
 
         let truncated = false;
         let content: string;
-        if (decoded.length > maxBytes) {
-          content = decoded.subarray(0, maxBytes).toString("utf8");
-          truncated = true;
+
+        if (mimeType.startsWith("text/")) {
+          // Safe to interpret as UTF-8 text.
+          if (decoded.length > maxBytes) {
+            content = decoded.subarray(0, maxBytes).toString("utf8");
+            truncated = true;
+          } else {
+            content = decoded.toString("utf8");
+          }
         } else {
-          content = decoded.toString("utf8");
+          // Binary content: return as standard base64 to avoid UTF-8 corruption.
+          if (decoded.length > maxBytes) {
+            content = decoded.subarray(0, maxBytes).toString("base64");
+            truncated = true;
+          } else {
+            content = base64;
+          }
         }
 
         const result = {
+          mimeType,
           size: attachment.size,
           truncated,
           returnedBytes: Math.min(decoded.length, maxBytes),

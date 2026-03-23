@@ -11,6 +11,7 @@
 
 import { http, HttpResponse } from "msw";
 import { INVALID_ACCESS_TOKEN } from "./gmail-labels.js";
+import { BINARY_BYTES } from "./gmail-messages.js";
 
 const BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 
@@ -18,6 +19,10 @@ function isAuthorized(request: Request): boolean {
   const auth = request.headers.get("Authorization") ?? "";
   return auth.startsWith("Bearer ") && auth !== `Bearer ${INVALID_ACCESS_TOKEN}`;
 }
+
+// Re-use the same encoded values as in the messages mock so tests can compare.
+const THREAD_TEXT_BODY = Buffer.from("Hello, World!").toString("base64url");
+const THREAD_BINARY_BODY = BINARY_BYTES.toString("base64url");
 
 export const MOCK_THREADS = {
   thread_001: {
@@ -29,12 +34,23 @@ export const MOCK_THREADS = {
         threadId: "thread_001",
         labelIds: ["INBOX", "UNREAD"],
         snippet: "First message in thread...",
+        // Includes a text/plain body to verify getThread decodes it to UTF-8.
+        payload: {
+          mimeType: "text/plain",
+          body: { data: THREAD_TEXT_BODY, size: 13 },
+        },
       },
       {
         id: "msg_003",
         threadId: "thread_001",
         labelIds: ["INBOX"],
         snippet: "Reply in thread...",
+        // Includes an image/png body to verify getThread keeps binary as base64,
+        // not corrupted UTF-8.
+        payload: {
+          mimeType: "image/png",
+          body: { data: THREAD_BINARY_BODY, size: BINARY_BYTES.length },
+        },
       },
     ],
   },

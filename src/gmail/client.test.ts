@@ -37,9 +37,10 @@ import {
   getProfile,
   GmailApiError,
   decodeBase64Url,
+  base64UrlToBase64,
 } from "./client.js";
 import { MOCK_LABELS } from "../mocks/handlers/gmail-labels.js";
-import { MOCK_MESSAGES, MOCK_ATTACHMENT } from "../mocks/handlers/gmail-messages.js";
+import { MOCK_MESSAGES, MOCK_ATTACHMENT, BINARY_BYTES } from "../mocks/handlers/gmail-messages.js";
 import { MOCK_THREADS } from "../mocks/handlers/gmail-threads.js";
 import { MOCK_PROFILE } from "../mocks/handlers/gmail-profile.js";
 import { MOCK_HISTORY } from "../mocks/handlers/gmail-history.js";
@@ -68,6 +69,31 @@ describe("decodeBase64Url", () => {
     expect(encoded).not.toContain("/");
     // Decoding should recover the original string.
     expect(decodeBase64Url(encoded)).toBe(original);
+  });
+});
+
+// ─── base64UrlToBase64 ────────────────────────────────────────────────────────
+
+describe("base64UrlToBase64", () => {
+  it("replaces - with + and _ with /", () => {
+    // base64url uses - and _ in place of + and /
+    expect(base64UrlToBase64("aGVsbG8-d29ybGQ_")).toBe("aGVsbG8+d29ybGQ/");
+  });
+
+  it("round-trips binary bytes without UTF-8 corruption", () => {
+    const encoded = BINARY_BYTES.toString("base64url");
+    const standard = base64UrlToBase64(encoded);
+    // Decoding the standard base64 back to a Buffer must equal the original bytes.
+    expect(Buffer.from(standard, "base64")).toEqual(BINARY_BYTES);
+  });
+
+  it("does not decode the bytes to a string (no UTF-8 conversion)", () => {
+    const encoded = BINARY_BYTES.toString("base64url");
+    const result = base64UrlToBase64(encoded);
+    // The result should be a base64 string, NOT raw bytes interpreted as UTF-8.
+    // If utf8 conversion happened, 0x89 would become the replacement char \uFFFD.
+    expect(result).not.toContain("\uFFFD");
+    expect(typeof result).toBe("string");
   });
 });
 
@@ -139,6 +165,23 @@ describe("getMessage", () => {
     const err = await getMessage(ACCESS_TOKEN, "unknown_id").catch((e) => e);
     expect(err).toBeInstanceOf(GmailApiError);
     expect((err as GmailApiError).status).toBe(404);
+  });
+
+  it("decodes text/plain body to UTF-8 string", async () => {
+    const message = await getMessage(ACCESS_TOKEN, "msg_001");
+    // msg_001 has mimeType "text/plain" — body.data should be decoded to text.
+    expect(message.payload?.body?.data).toBe("Hello, World!");
+  });
+
+  it("keeps binary inline parts as base64, not corrupted UTF-8", async () => {
+    // msg_003 has mimeType "image/png" with PNG magic bytes as body.data.
+    const message = await getMessage(ACCESS_TOKEN, "msg_003");
+    const data = message.payload?.body?.data;
+    expect(data).toBeDefined();
+    // Must NOT contain the UTF-8 replacement character from blind utf8 decoding.
+    expect(data).not.toContain("\uFFFD");
+    // Must be valid base64 that round-trips back to the original binary bytes.
+    expect(Buffer.from(data!, "base64")).toEqual(BINARY_BYTES);
   });
 
   it("throws on auth failure", async () => {
@@ -226,6 +269,23 @@ describe("getThread", () => {
     const thread = await getThread(ACCESS_TOKEN, "thread_001");
     expect(thread.id).toBe("thread_001");
     expect(thread.messages).toHaveLength(2);
+  });
+
+  it("decodes text/plain message bodies in the thread to UTF-8", async () => {
+    const thread = await getThread(ACCESS_TOKEN, "thread_001");
+    const msg001 = thread.messages?.find((m) => m.id === "msg_001");
+    // thread_001's first message has a text/plain payload — must be decoded.
+    expect(msg001?.payload?.body?.data).toBe("Hello, World!");
+  });
+
+  it("keeps binary message bodies in the thread as base64 (not corrupted UTF-8)", async () => {
+    const thread = await getThread(ACCESS_TOKEN, "thread_001");
+    const msg003 = thread.messages?.find((m) => m.id === "msg_003");
+    // thread_001's second message has an image/png payload with binary bytes.
+    const data = msg003?.payload?.body?.data;
+    expect(data).toBeDefined();
+    expect(data).not.toContain("\uFFFD");
+    expect(Buffer.from(data!, "base64")).toEqual(BINARY_BYTES);
   });
 
   it("throws 404 for unknown thread", async () => {
