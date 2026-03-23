@@ -208,14 +208,43 @@ describe("get_message tool", () => {
 });
 
 describe("get_attachment tool", () => {
-  it("returns attachment content", async () => {
+  it("returns binary attachment as base64 with mimeType (not corrupted UTF-8)", async () => {
+    // attach_001 is an application/pdf attachment with real PNG magic bytes.
+    // Before the fix, the tool would call toString("utf8") on these bytes,
+    // producing a replacement char (U+FFFD) and losing the data irreversibly.
     const { userId } = await createTestUserWithTokens(db);
     const body = await callTool(userId, "get_attachment", {
       messageId: "msg_002",
       attachmentId: "attach_001",
     });
     const text = body.result?.content?.[0]?.text;
-    expect(text).toContain("PDF content here");
+    expect(body.result?.isError).toBeFalsy();
+    const parsed = JSON.parse(text);
+
+    // mimeType must be included in the response.
+    expect(parsed.mimeType).toBe("application/pdf");
+
+    // data must be a valid base64 string that round-trips to the original bytes.
+    const { BINARY_BYTES } = await import("../mocks/handlers/gmail-messages.js");
+    expect(Buffer.from(parsed.data, "base64")).toEqual(BINARY_BYTES);
+
+    // Must NOT contain the UTF-8 replacement char produced by blind utf8 decoding.
+    expect(parsed.data).not.toContain("\uFFFD");
+  });
+
+  it("returns text attachment as decoded UTF-8 with mimeType", async () => {
+    // attach_text_001 is a text/plain attachment — should be decoded to a string.
+    const { userId } = await createTestUserWithTokens(db);
+    const body = await callTool(userId, "get_attachment", {
+      messageId: "msg_004",
+      attachmentId: "attach_text_001",
+    });
+    const text = body.result?.content?.[0]?.text;
+    expect(body.result?.isError).toBeFalsy();
+    const parsed = JSON.parse(text);
+
+    expect(parsed.mimeType).toBe("text/plain");
+    expect(parsed.data).toBe("Hello attachment!");
   });
 });
 
@@ -226,6 +255,33 @@ describe("get_thread tool", () => {
     const text = body.result?.content?.[0]?.text;
     expect(text).toContain("thread_001");
     expect(text).toContain("msg_001");
+  });
+
+  it("decodes text message bodies in thread to UTF-8", async () => {
+    // thread_001's msg_001 has a text/plain body — must appear as readable text.
+    const { userId } = await createTestUserWithTokens(db);
+    const body = await callTool(userId, "get_thread", { threadId: "thread_001" });
+    const text = body.result?.content?.[0]?.text;
+    expect(body.result?.isError).toBeFalsy();
+    expect(text).toContain("Hello, World!");
+  });
+
+  it("keeps binary message bodies in thread as base64 (not corrupted UTF-8)", async () => {
+    // thread_001's msg_003 has an image/png body with binary bytes.
+    // Before the fix, getThread never decoded bodies at all — raw base64url was returned.
+    const { userId } = await createTestUserWithTokens(db);
+    const body = await callTool(userId, "get_thread", { threadId: "thread_001" });
+    const text = body.result?.content?.[0]?.text;
+    expect(body.result?.isError).toBeFalsy();
+    const parsed = JSON.parse(text);
+    const msg003 = parsed.messages?.find((m: { id: string }) => m.id === "msg_003");
+    const data = msg003?.payload?.body?.data;
+    expect(data).toBeDefined();
+    // Must NOT contain UTF-8 replacement char from blind utf8 decoding.
+    expect(data).not.toContain("\uFFFD");
+    // Must round-trip back to the original binary bytes.
+    const { BINARY_BYTES } = await import("../mocks/handlers/gmail-messages.js");
+    expect(Buffer.from(data, "base64")).toEqual(BINARY_BYTES);
   });
 
   it("returns error for unknown thread ID", async () => {

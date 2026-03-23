@@ -26,6 +26,11 @@ function isAuthorized(request: Request): boolean {
 // "Hello, World!" in base64url
 const ENCODED_BODY = Buffer.from("Hello, World!").toString("base64url");
 
+// PNG magic bytes — a real binary sequence that is NOT valid UTF-8.
+// Byte 0x89 is not valid UTF-8 and will become the replacement character if
+// naively decoded with toString("utf8"), making corruption detectable in tests.
+export const BINARY_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
 export const MOCK_MESSAGES = {
   msg_001: {
     id: "msg_001",
@@ -69,11 +74,59 @@ export const MOCK_MESSAGES = {
     },
     sizeEstimate: 50512,
   },
+  // msg_003: a message with an inline binary part (embedded PNG image).
+  // Used to verify that decodeMessageParts does NOT corrupt binary body.data.
+  msg_003: {
+    id: "msg_003",
+    threadId: "thread_001",
+    labelIds: ["INBOX"],
+    snippet: "Image message...",
+    historyId: "12347",
+    internalDate: "1700002000000",
+    payload: {
+      mimeType: "image/png",
+      body: { data: BINARY_BYTES.toString("base64url"), size: BINARY_BYTES.length },
+    },
+    sizeEstimate: 256,
+  },
+  // msg_004: a message with a text/plain attachment (not inline body.data).
+  // Used to verify that get_attachment decodes text attachments to UTF-8.
+  msg_004: {
+    id: "msg_004",
+    threadId: "thread_003",
+    labelIds: ["INBOX"],
+    snippet: "Text attachment message...",
+    historyId: "12348",
+    internalDate: "1700003000000",
+    payload: {
+      mimeType: "multipart/mixed",
+      parts: [
+        {
+          mimeType: "text/plain",
+          body: { data: Buffer.from("Cover note").toString("base64url"), size: 10 },
+        },
+        {
+          mimeType: "text/plain",
+          filename: "notes.txt",
+          body: { attachmentId: "attach_text_001", size: 17 },
+        },
+      ],
+    },
+    sizeEstimate: 512,
+  },
 };
 
+// Binary attachment — real PNG magic bytes encoded as base64url.
+// Corruption test: toString("utf8") on these bytes produces a replacement char.
 export const MOCK_ATTACHMENT = {
-  size: 13,
-  data: Buffer.from("PDF content here").toString("base64url"),
+  size: BINARY_BYTES.length,
+  data: BINARY_BYTES.toString("base64url"),
+};
+
+// Text attachment — plain ASCII content.
+export const MOCK_TEXT_ATTACHMENT = {
+  size: 17,
+  data: Buffer.from("Hello attachment!").toString("base64url"),
 };
 
 export const gmailMessagesHandlers = [
@@ -135,6 +188,9 @@ export const gmailMessagesHandlers = [
         { error: { code: 404, message: "Attachment not found." } },
         { status: 404 }
       );
+    }
+    if (attachmentId === "attach_text_001") {
+      return HttpResponse.json(MOCK_TEXT_ATTACHMENT);
     }
     return HttpResponse.json(MOCK_ATTACHMENT);
   }),
