@@ -284,9 +284,16 @@ export function decodeBase64Url(encoded: string): string {
 /**
  * Converts a base64url string to standard base64 without decoding to bytes.
  * Safe for binary content because no UTF-8 interpretation occurs.
+ *
+ * Handles both character substitution (- → +, _ → /) and = padding so the
+ * result is always a valid RFC 4648 base64 string (length divisible by 4).
+ * Gmail base64url values are frequently unpadded; omitting this step causes
+ * failures with strict decoders.
  */
 export function base64UrlToBase64(encoded: string): string {
-  return encoded.replace(/-/g, "+").replace(/_/g, "/");
+  const base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
+  // Add = padding so the length is a multiple of 4.
+  return base64.padEnd(base64.length + (4 - (base64.length % 4)) % 4, "=");
 }
 
 /**

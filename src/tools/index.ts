@@ -32,7 +32,7 @@ import type postgres from "postgres";
 import { getValidAccessToken } from "../oauth/tokens.js";
 import * as gmail from "../gmail/client.js";
 import { assertNoBlockedLabels, assertLabelsExist } from "./validation.js";
-import { GmailApiError } from "../gmail/client.js";
+import { GmailApiError, base64UrlToBase64 } from "../gmail/client.js";
 
 /** Maximum message IDs allowed in a single batchModify request (Google limit). */
 const BATCH_MODIFY_MAX = 1000;
@@ -283,8 +283,8 @@ export function registerTools(
           findPartMimeType(message.payload, attachmentId) ??
           "application/octet-stream";
 
-        // Convert base64url → standard base64 (swap - and _ back to + and /).
-        const base64 = (attachment.data ?? "").replace(/-/g, "+").replace(/_/g, "/");
+        // Convert base64url → padded standard base64.
+        const base64 = base64UrlToBase64(attachment.data ?? "");
         const decoded = Buffer.from(base64, "base64");
 
         let truncated = false;

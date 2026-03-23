@@ -75,9 +75,28 @@ describe("decodeBase64Url", () => {
 // ─── base64UrlToBase64 ────────────────────────────────────────────────────────
 
 describe("base64UrlToBase64", () => {
-  it("replaces - with + and _ with /", () => {
-    // base64url uses - and _ in place of + and /
+  it("replaces - with + and _ with / and adds = padding", () => {
+    // base64url uses - and _ in place of + and /, and omits = padding.
+    // "aGVsbG8-d29ybGQ_" is 16 chars — already a multiple of 4, so no padding needed.
     expect(base64UrlToBase64("aGVsbG8-d29ybGQ_")).toBe("aGVsbG8+d29ybGQ/");
+  });
+
+  it("adds = padding when the input length is not a multiple of 4", () => {
+    // "YQ" decodes to "a" (1 byte) — needs 2 padding chars to reach length 4.
+    expect(base64UrlToBase64("YQ")).toBe("YQ==");
+    // "YWI" decodes to "ab" (2 bytes) — needs 1 padding char.
+    expect(base64UrlToBase64("YWI")).toBe("YWI=");
+    // "YWJj" is already length 4 — no padding needed.
+    expect(base64UrlToBase64("YWJj")).toBe("YWJj");
+  });
+
+  it("output length is always a multiple of 4", () => {
+    // Gmail base64url strings can be any length; the result must always be padded.
+    for (const len of [1, 2, 3, 4, 5, 6, 7, 8]) {
+      const input = "a".repeat(len);
+      const result = base64UrlToBase64(input);
+      expect(result.length % 4).toBe(0);
+    }
   });
 
   it("round-trips binary bytes without UTF-8 corruption", () => {
