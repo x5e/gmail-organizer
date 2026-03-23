@@ -4,8 +4,8 @@
  * Integration tests for all 11 MCP tool handlers via the POST /mcp endpoint.
  *
  * Each test:
- *   1. Creates a test user with valid OAuth tokens.
- *   2. Sends a POST /mcp request with the user ID as a Bearer token.
+ *   1. Creates a test user with valid OAuth tokens and a bearer token.
+ *   2. Sends a POST /mcp request with the bearer token.
  *   3. Asserts the response contains the expected tool result.
  *
  * HTTP is intercepted by MSW (Gmail API calls are mocked).
@@ -21,6 +21,7 @@
 import { describe, it, expect, beforeEach, afterAll, beforeAll } from "vitest";
 import { buildApp } from "../server.js";
 import { createTestDb, truncateAllTables, createTestUserWithTokens } from "../test/db-helpers.js";
+import { hashToken } from "../oauth/tokens.js";
 import type { FastifyInstance } from "fastify";
 
 const db = createTestDb();
@@ -50,7 +51,7 @@ afterAll(async () => {
  * The MCP SDK requires Accept: application/json, text/event-stream.
  */
 async function sendMcpRequest(
-  userId: string,
+  bearerToken: string,
   method: string,
   params: Record<string, unknown> = {}
 ): Promise<{ result?: unknown; error?: unknown; [key: string]: unknown }> {
@@ -61,7 +62,7 @@ async function sendMcpRequest(
       "Content-Type": "application/json",
       "Accept": "application/json, text/event-stream",
       "Mcp-Session-Id": "test-session",
-      Authorization: `Bearer ${userId}`,
+      Authorization: `Bearer ${bearerToken}`,
     },
     payload: {
       jsonrpc: "2.0",
@@ -93,11 +94,11 @@ async function sendMcpRequest(
 
 /** Convenience wrapper for tools/call. */
 async function callTool(
-  userId: string,
+  bearerToken: string,
   toolName: string,
   params: Record<string, unknown> = {}
 ): Promise<{ result?: unknown; error?: unknown; [key: string]: unknown }> {
-  return sendMcpRequest(userId, "tools/call", { name: toolName, arguments: params });
+  return sendMcpRequest(bearerToken, "tools/call", { name: toolName, arguments: params });
 }
 
 describe("POST /mcp authorization", () => {
@@ -131,8 +132,8 @@ describe("POST /mcp authorization", () => {
 
 describe("tools/list", () => {
   it("returns all 11 tools", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await sendMcpRequest(userId, "tools/list", {});
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await sendMcpRequest(bearerToken, "tools/list", {});
     expect(body.result?.tools).toHaveLength(11);
     const toolNames = (body.result as { tools: { name: string }[] }).tools.map(
       (t) => t.name
@@ -153,28 +154,56 @@ describe("tools/list", () => {
 
 describe("list_labels tool", () => {
   it("returns labels from Gmail API", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "list_labels");
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "list_labels");
     expect(body.result?.content?.[0]?.text).toContain("INBOX");
   });
 
-  it("errors for invalid user ID (no token row)", async () => {
-    const body = await callTool("00000000-0000-0000-0000-000000000000", "list_labels");
-    expect(body.result?.isError).toBe(true);
+  it("returns 401 for invalid bearer token", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        Authorization: "Bearer invalid-token-that-does-not-exist",
+      },
+      payload: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+    });
+    expect(response.statusCode).toBe(401);
+  });
+
+  it("returns 401 for a revoked bearer token", async () => {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const tokenHash = hashToken(bearerToken);
+
+    await db`INSERT INTO token_revocations (token_hash) VALUES (${tokenHash})`;
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        Authorization: `Bearer ${bearerToken}`,
+      },
+      payload: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+    });
+    expect(response.statusCode).toBe(401);
   });
 });
 
 describe("search_messages tool", () => {
   it("returns messages for a query", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "search_messages", { q: "is:unread" });
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "search_messages", { q: "is:unread" });
     const text = body.result?.content?.[0]?.text;
     expect(text).toContain("msg_001");
   });
 
   it("validates maxResults bounds", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "search_messages", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "search_messages", {
       q: "test",
       maxResults: 9999, // exceeds max of 500
     });
@@ -184,8 +213,8 @@ describe("search_messages tool", () => {
 
 describe("list_threads tool", () => {
   it("returns threads", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "list_threads");
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "list_threads");
     const text = body.result?.content?.[0]?.text;
     expect(text).toContain("thread_001");
   });
@@ -193,16 +222,16 @@ describe("list_threads tool", () => {
 
 describe("get_message tool", () => {
   it("returns a message with decoded body", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "get_message", { messageId: "msg_001" });
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "get_message", { messageId: "msg_001" });
     const text = body.result?.content?.[0]?.text;
     expect(text).toContain("Hello, World!");
     expect(text).toContain("msg_001");
   });
 
   it("returns error for unknown message ID", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "get_message", { messageId: "unknown_id" });
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "get_message", { messageId: "unknown_id" });
     expect(body.result?.isError).toBe(true);
   });
 });
@@ -212,8 +241,8 @@ describe("get_attachment tool", () => {
     // attach_001 is an application/pdf attachment with real PNG magic bytes.
     // Before the fix, the tool would call toString("utf8") on these bytes,
     // producing a replacement char (U+FFFD) and losing the data irreversibly.
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "get_attachment", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "get_attachment", {
       messageId: "msg_002",
       attachmentId: "attach_001",
     });
@@ -234,8 +263,8 @@ describe("get_attachment tool", () => {
 
   it("returns text attachment as decoded UTF-8 with mimeType", async () => {
     // attach_text_001 is a text/plain attachment — should be decoded to a string.
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "get_attachment", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "get_attachment", {
       messageId: "msg_004",
       attachmentId: "attach_text_001",
     });
@@ -250,8 +279,8 @@ describe("get_attachment tool", () => {
 
 describe("get_thread tool", () => {
   it("returns a thread with messages", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "get_thread", { threadId: "thread_001" });
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "get_thread", { threadId: "thread_001" });
     const text = body.result?.content?.[0]?.text;
     expect(text).toContain("thread_001");
     expect(text).toContain("msg_001");
@@ -259,8 +288,8 @@ describe("get_thread tool", () => {
 
   it("decodes text message bodies in thread to UTF-8", async () => {
     // thread_001's msg_001 has a text/plain body — must appear as readable text.
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "get_thread", { threadId: "thread_001" });
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "get_thread", { threadId: "thread_001" });
     const text = body.result?.content?.[0]?.text;
     expect(body.result?.isError).toBeFalsy();
     expect(text).toContain("Hello, World!");
@@ -269,8 +298,8 @@ describe("get_thread tool", () => {
   it("keeps binary message bodies in thread as base64 (not corrupted UTF-8)", async () => {
     // thread_001's msg_003 has an image/png body with binary bytes.
     // Before the fix, getThread never decoded bodies at all — raw base64url was returned.
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "get_thread", { threadId: "thread_001" });
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "get_thread", { threadId: "thread_001" });
     const text = body.result?.content?.[0]?.text;
     expect(body.result?.isError).toBeFalsy();
     const parsed = JSON.parse(text);
@@ -285,16 +314,16 @@ describe("get_thread tool", () => {
   });
 
   it("returns error for unknown thread ID", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "get_thread", { threadId: "unknown_thread" });
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "get_thread", { threadId: "unknown_thread" });
     expect(body.result?.isError).toBe(true);
   });
 });
 
 describe("get_history tool", () => {
   it("returns history records", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "get_history", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "get_history", {
       startHistoryId: "12345",
     });
     const text = body.result?.content?.[0]?.text;
@@ -304,8 +333,8 @@ describe("get_history tool", () => {
 
 describe("get_profile tool", () => {
   it("returns the user profile", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "get_profile");
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "get_profile");
     const text = body.result?.content?.[0]?.text;
     expect(text).toContain("testuser@example.com");
   });
@@ -313,8 +342,8 @@ describe("get_profile tool", () => {
 
 describe("modify_message_labels tool", () => {
   it("modifies labels on a message", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "modify_message_labels", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "modify_message_labels", {
       messageId: "msg_001",
       addLabelIds: ["Label_1"],
       removeLabelIds: ["UNREAD"],
@@ -325,8 +354,8 @@ describe("modify_message_labels tool", () => {
   });
 
   it("blocks TRASH label", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "modify_message_labels", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "modify_message_labels", {
       messageId: "msg_001",
       addLabelIds: ["TRASH"],
     });
@@ -335,8 +364,8 @@ describe("modify_message_labels tool", () => {
   });
 
   it("blocks SPAM label in removeLabelIds", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "modify_message_labels", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "modify_message_labels", {
       messageId: "msg_001",
       removeLabelIds: ["SPAM"],
     });
@@ -344,8 +373,8 @@ describe("modify_message_labels tool", () => {
   });
 
   it("rejects unknown label IDs", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "modify_message_labels", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "modify_message_labels", {
       messageId: "msg_001",
       addLabelIds: ["NONEXISTENT_LABEL_XYZ"],
     });
@@ -356,8 +385,8 @@ describe("modify_message_labels tool", () => {
 
 describe("modify_thread_labels tool", () => {
   it("modifies labels on a thread", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "modify_thread_labels", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "modify_thread_labels", {
       threadId: "thread_001",
       addLabelIds: ["Label_2"],
       removeLabelIds: ["UNREAD"],
@@ -368,8 +397,8 @@ describe("modify_thread_labels tool", () => {
   });
 
   it("blocks TRASH label", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "modify_thread_labels", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "modify_thread_labels", {
       threadId: "thread_001",
       addLabelIds: ["TRASH"],
     });
@@ -377,8 +406,8 @@ describe("modify_thread_labels tool", () => {
   });
 
   it("rejects unknown label IDs", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "modify_thread_labels", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "modify_thread_labels", {
       threadId: "thread_001",
       addLabelIds: ["FAKE_LABEL"],
     });
@@ -388,8 +417,8 @@ describe("modify_thread_labels tool", () => {
 
 describe("error handling in write tools", () => {
   it("modify_thread_labels returns error for unknown thread", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "modify_thread_labels", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "modify_thread_labels", {
       threadId: "no_such_thread",
       addLabelIds: ["Label_1"],
     });
@@ -399,12 +428,11 @@ describe("error handling in write tools", () => {
 
   it("tools return 401 error message when access token is rejected by Gmail API", async () => {
     // Store "invalid-token" as the access token — MSW rejects it with 401.
-    const { userId } = await createTestUserWithTokens(db, {
+    const { bearerToken } = await createTestUserWithTokens(db, {
       accessToken: "invalid-token",
-      // Expiry well in future so no refresh attempt is made
       accessTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
     });
-    const body = await callTool(userId, "list_labels");
+    const body = await callTool(bearerToken, "list_labels");
     expect(body.result?.isError).toBe(true);
     expect(body.result?.content?.[0]?.text).toMatch(/authorization/i);
   });
@@ -412,8 +440,8 @@ describe("error handling in write tools", () => {
 
 describe("batch_modify_message_labels tool", () => {
   it("batch-modifies labels on multiple messages", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "batch_modify_message_labels", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "batch_modify_message_labels", {
       ids: ["msg_001", "msg_002"],
       addLabelIds: ["Label_2"],
     });
@@ -423,8 +451,8 @@ describe("batch_modify_message_labels tool", () => {
   });
 
   it("blocks TRASH label in batch operations", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "batch_modify_message_labels", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "batch_modify_message_labels", {
       ids: ["msg_001"],
       addLabelIds: ["TRASH"],
     });
@@ -432,8 +460,8 @@ describe("batch_modify_message_labels tool", () => {
   });
 
   it("rejects empty ids array", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "batch_modify_message_labels", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "batch_modify_message_labels", {
       ids: [],
       addLabelIds: ["Label_1"],
     });
@@ -441,8 +469,8 @@ describe("batch_modify_message_labels tool", () => {
   });
 
   it("rejects ids array exceeding 1000 messages", async () => {
-    const { userId } = await createTestUserWithTokens(db);
-    const body = await callTool(userId, "batch_modify_message_labels", {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const body = await callTool(bearerToken, "batch_modify_message_labels", {
       ids: Array.from({ length: 1001 }, (_, i) => `msg_${i}`),
       addLabelIds: ["Label_1"],
     });

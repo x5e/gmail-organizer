@@ -15,10 +15,13 @@
  *   // use accessToken for Gmail API calls
  */
 
+import { createHash, randomBytes } from "node:crypto";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import { config } from "../config.js";
 import { encrypt, decrypt } from "../crypto.js";
 import {
-  createUser,
+  findOrCreateUserByEmail,
+  insertBearerToken,
   upsertOAuthTokens,
   updateAccessToken,
   getOAuthTokens,
@@ -28,6 +31,15 @@ import type postgres from "postgres";
 /** Google OAuth token endpoint. */
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 
+/** Google's JWKS endpoint for id_token signature verification. */
+const GOOGLE_JWKS_URI = new URL("https://www.googleapis.com/oauth2/v3/certs");
+
+/** Expected issuer in Google id_tokens. */
+const GOOGLE_ISSUER = "https://accounts.google.com";
+
+/** Cached JWKS fetcher — lazily retrieves and caches Google's public keys. */
+const googleJwks = createRemoteJWKSet(GOOGLE_JWKS_URI);
+
 /** How many seconds before expiry to proactively refresh. */
 const REFRESH_BUFFER_SECONDS = 5 * 60; // 5 minutes
 
@@ -35,8 +47,40 @@ export interface TokenResponse {
   access_token: string;
   expires_in: number;
   refresh_token?: string;
+  id_token?: string;
   token_type: string;
   scope?: string;
+}
+
+export interface ExchangeResult {
+  userId: string;
+  bearerToken: string;
+}
+
+/**
+ * Verifies a Google id_token: checks the JWT signature against Google's JWKS,
+ * validates standard claims (iss, aud, exp, iat), and rejects unverified emails.
+ */
+async function verifyIdToken(idToken: string): Promise<{ email: string }> {
+  const { payload } = await jwtVerify(idToken, googleJwks, {
+    issuer: GOOGLE_ISSUER,
+    audience: config.googleClientId,
+  });
+
+  if (payload.email_verified !== true) {
+    throw new Error("id_token email is not verified.");
+  }
+
+  if (typeof payload.email !== "string" || !payload.email) {
+    throw new Error("id_token does not contain an email claim.");
+  }
+
+  return { email: payload.email };
+}
+
+/** SHA-256 hash a string and return the hex digest. */
+export function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
 }
 
 /**
@@ -45,7 +89,11 @@ export interface TokenResponse {
  *
  * Called from the OAuth callback handler after Google redirects back with `code`.
  *
- * @returns The new user ID (UUID) created for this connected account.
+ * 1. Exchanges the code for Google tokens (including id_token with email).
+ * 2. Extracts the user's email from the id_token.
+ * 3. Finds or creates the user by email.
+ * 4. Stores encrypted OAuth credentials (upsert handles re-authentication).
+ * 5. Mints a high-entropy bearer token, stores its hash, and returns the plaintext.
  */
 export async function exchangeCodeForTokens(
   db: postgres.Sql,
@@ -54,7 +102,7 @@ export async function exchangeCodeForTokens(
     codeVerifier,
     redirectUri,
   }: { code: string; codeVerifier: string; redirectUri: string }
-): Promise<string> {
+): Promise<ExchangeResult> {
   const params = new URLSearchParams({
     grant_type: "authorization_code",
     client_id: config.googleClientId,
@@ -84,8 +132,17 @@ export async function exchangeCodeForTokens(
     );
   }
 
-  // Create user record and store encrypted tokens.
-  const userId = await createUser(db);
+  if (!tokens.id_token) {
+    throw new Error(
+      "Google did not return an id_token. " +
+        "Ensure openid and email scopes are requested."
+    );
+  }
+
+  const { email } = await verifyIdToken(tokens.id_token);
+
+  const userId = await findOrCreateUserByEmail(db, email);
+
   const encryptedRefreshToken = encrypt(
     tokens.refresh_token,
     config.tokenEncryptionKey
@@ -99,7 +156,10 @@ export async function exchangeCodeForTokens(
     accessTokenExpiresAt: expiresAt,
   });
 
-  return userId;
+  const bearerToken = randomBytes(32).toString("base64url");
+  await insertBearerToken(db, { tokenHash: hashToken(bearerToken), userId });
+
+  return { userId, bearerToken };
 }
 
 /**

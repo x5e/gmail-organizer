@@ -64,6 +64,8 @@ describe("GET /oauth/authorize", () => {
     expect(redirectUrl.searchParams.get("prompt")).toBe("consent");
     expect(redirectUrl.searchParams.get("code_challenge_method")).toBe("S256");
     expect(redirectUrl.searchParams.get("scope")).toContain("gmail.modify");
+    expect(redirectUrl.searchParams.get("scope")).toContain("openid");
+    expect(redirectUrl.searchParams.get("scope")).toContain("email");
     expect(redirectUrl.searchParams.get("state")).toBeTruthy();
     expect(redirectUrl.searchParams.get("code_challenge")).toBeTruthy();
   });
@@ -77,8 +79,7 @@ describe("GET /oauth/authorize", () => {
 });
 
 describe("GET /oauth/callback", () => {
-  it("completes the flow with valid code and state", async () => {
-    // First, initiate the flow to create a state row.
+  it("completes the flow with valid code and state, returns a bearer token", async () => {
     const authResponse = await app.inject({
       method: "GET",
       url: "/oauth/authorize",
@@ -87,7 +88,6 @@ describe("GET /oauth/callback", () => {
     const authUrl = new URL(location);
     const state = authUrl.searchParams.get("state")!;
 
-    // Simulate Google's callback.
     const callbackResponse = await app.inject({
       method: "GET",
       url: `/oauth/callback?code=valid_auth_code&state=${state}`,
@@ -96,12 +96,12 @@ describe("GET /oauth/callback", () => {
     expect(callbackResponse.statusCode).toBe(200);
     const body = JSON.parse(callbackResponse.body);
     expect(body.success).toBe(true);
-    expect(body.userId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-    );
+    expect(typeof body.token).toBe("string");
+    expect(body.token.length).toBeGreaterThan(0);
+    expect(body.userId).toBeUndefined();
   });
 
-  it("creates a user and token row in the database", async () => {
+  it("creates a user, oauth token row, and bearer token in the database", async () => {
     const authResponse = await app.inject({
       method: "GET",
       url: "/oauth/authorize",
@@ -112,13 +112,19 @@ describe("GET /oauth/callback", () => {
       method: "GET",
       url: `/oauth/callback?code=valid_auth_code&state=${state}`,
     });
-    const { userId } = JSON.parse(callbackResponse.body);
+    const { token } = JSON.parse(callbackResponse.body);
 
-    const [user] = await db<{ id: string }[]>`SELECT id FROM users WHERE id = ${userId}`;
-    expect(user?.id).toBe(userId);
+    const [user] = await db<{ id: string; email: string }[]>`SELECT id, email FROM users LIMIT 1`;
+    expect(user).toBeDefined();
+    expect(user!.email).toBe("testuser@example.com");
 
-    const [tokenRow] = await db`SELECT user_id FROM oauth_tokens WHERE user_id = ${userId}`;
-    expect(tokenRow).toBeDefined();
+    const [oauthRow] = await db`SELECT user_id FROM oauth_tokens WHERE user_id = ${user!.id}`;
+    expect(oauthRow).toBeDefined();
+
+    const { hashToken } = await import("./tokens.js");
+    const [btRow] = await db`SELECT user_id FROM bearer_tokens WHERE token_hash = ${hashToken(token)}`;
+    expect(btRow).toBeDefined();
+    expect(btRow!.user_id).toBe(user!.id);
   });
 
   it("consumes (deletes) the oauth state row after the callback", async () => {
@@ -166,6 +172,36 @@ describe("GET /oauth/callback", () => {
     expect(response.statusCode).toBe(400);
     const body = JSON.parse(response.body);
     expect(body.error).toBe("invalid_request");
+  });
+
+  it("re-authentication with same email reuses the user but creates a new token", async () => {
+    // First auth flow
+    const auth1 = await app.inject({ method: "GET", url: "/oauth/authorize" });
+    const state1 = new URL(auth1.headers["location"] as string).searchParams.get("state")!;
+    const cb1 = await app.inject({
+      method: "GET",
+      url: `/oauth/callback?code=valid_auth_code&state=${state1}`,
+    });
+    const { token: token1 } = JSON.parse(cb1.body);
+
+    // Second auth flow (same email from MSW mock)
+    const auth2 = await app.inject({ method: "GET", url: "/oauth/authorize" });
+    const state2 = new URL(auth2.headers["location"] as string).searchParams.get("state")!;
+    const cb2 = await app.inject({
+      method: "GET",
+      url: `/oauth/callback?code=valid_auth_code&state=${state2}`,
+    });
+    const { token: token2 } = JSON.parse(cb2.body);
+
+    expect(token1).not.toBe(token2);
+
+    // Only one user row should exist (same email).
+    const users = await db`SELECT id FROM users`;
+    expect(users).toHaveLength(1);
+
+    // Both bearer tokens should be valid.
+    const bearerTokens = await db`SELECT token_hash FROM bearer_tokens`;
+    expect(bearerTokens).toHaveLength(2);
   });
 
   it("returns 500 when token exchange fails (invalid code)", async () => {

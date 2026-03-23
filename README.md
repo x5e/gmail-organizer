@@ -1,8 +1,8 @@
 # Gmail Organizer MCP Connector
 
-A remote [Model Context Protocol (MCP)](https://spec.modelcontextprotocol.io) server that gives Claude the ability to actively **organize a user's Gmail inbox** — applying and removing labels at the message, thread, and batch level.
+A remote [Model Context Protocol (MCP)](https://spec.modelcontextprotocol.io) server that gives MCP-compatible AI assistants the ability to actively **organize a user's Gmail inbox** — applying and removing labels at the message, thread, and batch level.
 
-Unlike Anthropic's official Gmail connector (read-only), this connector exposes write operations, making it possible to ask Claude to triage your inbox, label conversations by project or priority, archive handled threads, or bulk-relabel thousands of messages in a single operation.
+This connector exposes write operations beyond what most read-only Gmail integrations provide, making it possible to ask your AI assistant to triage your inbox, label conversations by project or priority, archive handled threads, or bulk-relabel thousands of messages in a single operation.
 
 > **Status:** Implementation complete. Two external review processes (Google OAuth verification + Anthropic directory submission) are required before it can be made available to the general public — see [Path to Public Availability](#path-to-public-availability) below.
 
@@ -24,7 +24,7 @@ Unlike Anthropic's official Gmail connector (read-only), this connector exposes 
   - [Option E: VPS (DigitalOcean / Hetzner)](#option-e-vps-digitalocean--hetzner)
 - [Google Cloud Project Setup](#google-cloud-project-setup)
 - [Environment Variables](#environment-variables)
-- [Connecting to Claude](#connecting-to-claude)
+- [Connecting an MCP Client](#connecting-an-mcp-client)
 - [Path to Public Availability](#path-to-public-availability)
 - [Security Design](#security-design)
 - [Project Structure](#project-structure)
@@ -35,18 +35,18 @@ Unlike Anthropic's official Gmail connector (read-only), this connector exposes 
 
 ## What It Does
 
-### Capabilities added over the official Gmail connector
+### Capabilities
 
-| Capability | Official connector | This connector |
-|---|---|---|
-| Read messages and threads | ✅ | ✅ |
-| Search messages | ✅ | ✅ |
-| List labels | ✅ | ✅ |
-| Create draft replies | ✅ | ❌ (out of scope) |
-| **Apply / remove labels on messages** | ❌ | ✅ |
-| **Apply / remove labels on entire threads** | ❌ | ✅ |
-| **Batch label up to 1,000 messages at once** | ❌ | ✅ |
-| **Incremental mailbox sync via history API** | ❌ | ✅ |
+| Capability | Status |
+|---|---|
+| Read messages and threads | ✅ |
+| Search messages | ✅ |
+| List labels | ✅ |
+| **Apply / remove labels on messages** | ✅ |
+| **Apply / remove labels on entire threads** | ✅ |
+| **Batch label up to 1,000 messages at once** | ✅ |
+| **Incremental mailbox sync via history API** | ✅ |
+| Create draft replies | ❌ (out of scope) |
 
 ### What is deliberately excluded
 
@@ -94,9 +94,9 @@ All write tools:
 ## Architecture Overview
 
 ```
-Claude (claude.ai)
+MCP Client (Claude, OpenClaw, etc.)
         │
-        │  POST /mcp  (Streamable HTTP, Bearer token = user UUID)
+        │  POST /mcp  (Streamable HTTP, Bearer token)
         ▼
 ┌─────────────────────────────────────────────────────────┐
 │                  Fastify HTTP Server                     │
@@ -107,23 +107,24 @@ Claude (claude.ai)
 │  GET  /health           ─► load balancer health check   │
 │                                                         │
 │  Per-request flow:                                      │
-│    1. Extract user ID from Bearer token                  │
+│    1. Hash bearer token, resolve to user ID via DB      │
 │    2. Look up encrypted refresh token in PostgreSQL      │
 │    3. Decrypt + refresh access token if needed          │
 │    4. Call Gmail REST API                               │
-│    5. Return structured result to Claude                 │
+│    5. Return structured result to MCP client             │
 └─────────────────────────────────────────────────────────┘
         │                          │
         ▼                          ▼
   PostgreSQL                 Gmail API
-  (users, oauth_tokens,      (googleapis.com)
-   oauth_state tables)
+  (users, bearer_tokens,    (googleapis.com)
+   oauth_tokens, etc.)
 ```
 
 **Key design decisions:**
 
 - **Stateless MCP transport** — each POST to `/mcp` is fully self-contained; no per-session in-memory state. This means horizontal scaling works without sticky sessions.
-- **Encrypted tokens at rest** — refresh tokens are encrypted with AES-256-GCM before storage. The database never sees plaintext credentials.
+- **Hashed bearer tokens** — bearer tokens are generated as high-entropy random values. Only the SHA-256 hash is stored server-side; the plaintext is returned once at OAuth completion and never persisted. A database breach does not directly compromise live tokens.
+- **Encrypted tokens at rest** — Google OAuth refresh tokens are encrypted with AES-256-GCM before storage. The database never sees plaintext credentials.
 - **Proactive token refresh** — access tokens are cached in the database and refreshed proactively 5 minutes before expiry, avoiding latency spikes and unnecessary round-trips to Google.
 - **PKCE OAuth flow** — the state verifier never leaves the server, protecting against authorization code interception.
 
@@ -364,7 +365,7 @@ These steps are required before you can run the connector with real Google accou
    - Go to **APIs & Services → OAuth consent screen**
    - Choose **External** (for personal testing; see below for production)
    - Fill in app name, support email, and developer contact
-   - Add the scope: `https://www.googleapis.com/auth/gmail.modify`
+   - Add the scopes: `https://www.googleapis.com/auth/gmail.modify`, `openid`, `email`
    - Add your own Google account as a **Test user**
 
 4. Create OAuth credentials:
@@ -393,21 +394,31 @@ Copy `.env.example` to `.env` and fill in the values:
 | `BASE_URL` | ✅ | Public HTTPS URL of this server, e.g. `https://your-domain.com` (no trailing slash). Used to construct the OAuth callback URL. |
 | `PORT` | — | HTTP port to listen on (default: `3000`) |
 | `LOG_LEVEL` | — | Pino log level: `trace`, `debug`, `info`, `warn`, `error` (default: `info`) |
-| `ALLOWED_ORIGIN` | — | CORS allowed origin (default: `*`; in production, set to Claude's domain) |
+| `ALLOWED_ORIGIN` | — | CORS allowed origin (default: allows all origins; in production, set to your MCP client's domain) |
 
 **Never commit real secrets to source control.** For production, use a secrets manager (Google Secret Manager, AWS Secrets Manager, Doppler, etc.) rather than `.env` files.
 
 ---
 
-## Connecting to Claude
+## Connecting an MCP Client
 
-Once your server is deployed and a Google Cloud project is configured:
+Once your server is deployed and a Google Cloud project is configured, connect from any MCP-compatible client.
 
-1. In Claude (claude.ai or the desktop app), go to **Settings → Connectors**.
+### Claude (claude.ai)
+
+1. Go to **Settings → Connectors**.
 2. Click **Add connector** and select **Custom connector**.
 3. Enter your server's MCP URL: `https://your-domain.com/mcp`
 4. Claude will initiate the OAuth flow — you'll be redirected to Google to grant access.
 5. After authorizing, Claude will have access to all 11 Gmail tools.
+
+### Other MCP Clients
+
+Any MCP-compatible client (e.g., OpenClaw) can connect by:
+
+1. Visiting `https://your-domain.com/oauth/authorize` in a browser to complete the Google OAuth flow.
+2. Copying the bearer token from the JSON response.
+3. Configuring the client to use `https://your-domain.com/mcp` with `Authorization: Bearer <token>`.
 
 **Example prompts you can use after connecting:**
 
@@ -456,6 +467,8 @@ The two reviews are independent and can be pursued in parallel.
 
 ## Security Design
 
+**Bearer token security:** API bearer tokens are generated as 32-byte cryptographically random values. Only the SHA-256 hash is stored in the database; the plaintext is returned to the client once at OAuth completion and never persisted server-side. A database breach does not directly compromise live bearer tokens. Tokens can be revoked via the append-only `token_revocations` table.
+
 **Token encryption:** OAuth refresh tokens are encrypted with AES-256-GCM before being written to PostgreSQL. Each encryption uses a freshly generated 12-byte nonce; the stored value is `nonce || ciphertext || auth_tag`. The database never sees plaintext token values. A database credential leak alone is insufficient to recover user tokens.
 
 **PKCE OAuth flow:** The code verifier is generated server-side, stored in the `oauth_state` table, and never transmitted to the client. Only the SHA-256 challenge is sent to Google. This prevents authorization code interception attacks.
@@ -464,7 +477,7 @@ The two reviews are independent and can be pursued in parallel.
 
 **Label existence validation:** All write tools validate that the submitted label IDs exist in the user's account before sending any mutation to Google. This prevents silent failures and reduces the impact of hallucinated label IDs.
 
-**Per-user token isolation:** Each user's token is stored and retrieved by UUID; there is no mechanism by which one user's token can be used to access another user's data.
+**Per-user token isolation:** Each user's OAuth credentials are stored and retrieved by internal UUID; there is no mechanism by which one user's token can be used to access another user's data. Users are identified by their Gmail address, and re-authentication reuses the existing user record.
 
 **Secrets never logged:** The Pino logger is configured to redact `Authorization` headers, `access_token`, `refresh_token`, and `encrypted_refresh_token` fields at all log levels.
 
@@ -479,12 +492,12 @@ The two reviews are independent and can be pursued in parallel.
 ├── src/
 │   ├── server.ts                  # Fastify app builder + entry point
 │   ├── config.ts                  # Environment variable loading/validation
-│   ├── mcp.ts                     # MCP server + StreamableHTTP handler
+│   ├── mcp.ts                     # MCP server + StreamableHTTP handler + token resolution
 │   ├── crypto.ts                  # AES-256-GCM encrypt/decrypt
 │   ├── db/
 │   │   ├── index.ts               # postgres.js connection pool
 │   │   ├── migrate.ts             # SQL migration runner
-│   │   ├── users.ts               # users + oauth_tokens DB operations
+│   │   ├── users.ts               # users + oauth_tokens + bearer_tokens DB operations
 │   │   └── oauth-state.ts         # oauth_state DB operations
 │   ├── gmail/
 │   │   └── client.ts              # Gmail REST API wrapper (all 11 endpoints)

@@ -1,7 +1,7 @@
 /**
  * src/db/users.ts
  *
- * Database operations for the `users` and `oauth_tokens` tables.
+ * Database operations for the `users`, `oauth_tokens`, and `bearer_tokens` tables.
  *
  * All token values are handled in plaintext here — encryption and decryption
  * happen in the callers (src/oauth/tokens.ts) before values reach these functions.
@@ -22,15 +22,50 @@ export interface OAuthTokenRow {
 }
 
 /**
- * Creates a new user row and returns the generated UUID.
+ * Finds an existing user by email or creates a new one.
+ * Uses ON CONFLICT to handle the race-free find-or-create pattern.
  */
-export async function createUser(
-  db: postgres.Sql = defaultSql
+export async function findOrCreateUserByEmail(
+  db: postgres.Sql = defaultSql,
+  email: string
 ): Promise<string> {
   const [row] = await db<{ id: string }[]>`
-    INSERT INTO users DEFAULT VALUES RETURNING id
+    INSERT INTO users (email) VALUES (${email})
+    ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
+    RETURNING id
   `;
   return row!.id;
+}
+
+/**
+ * Inserts a hashed bearer token into the append-only bearer_tokens table.
+ */
+export async function insertBearerToken(
+  db: postgres.Sql = defaultSql,
+  { tokenHash, userId }: { tokenHash: string; userId: string }
+): Promise<void> {
+  await db`
+    INSERT INTO bearer_tokens (token_hash, user_id)
+    VALUES (${tokenHash}, ${userId})
+  `;
+}
+
+/**
+ * Resolves a hashed bearer token to a user ID.
+ * Returns null if the token does not exist or has been revoked.
+ */
+export async function resolveToken(
+  db: postgres.Sql = defaultSql,
+  tokenHash: string
+): Promise<string | null> {
+  const rows = await db<{ user_id: string }[]>`
+    SELECT bt.user_id
+    FROM bearer_tokens bt
+    LEFT JOIN token_revocations tr ON bt.token_hash = tr.token_hash
+    WHERE bt.token_hash = ${tokenHash}
+      AND tr.token_hash IS NULL
+  `;
+  return rows.length > 0 ? rows[0]!.user_id : null;
 }
 
 /**

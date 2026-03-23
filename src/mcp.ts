@@ -5,9 +5,8 @@
  *
  * The server uses the Streamable HTTP transport in stateless mode
  * (sessionIdGenerator: undefined). Each POST to /mcp is self-contained:
- * the bearer token (user ID) is extracted from the Authorization header,
- * the corresponding Gmail tokens are fetched from the database, and the
- * requested Gmail API call is made.
+ * the bearer token is hashed, resolved to a user ID via the database,
+ * and the corresponding Gmail tokens are fetched for the API call.
  *
  * Stateless mode means no per-session in-memory state is kept, which allows
  * horizontal scaling without sticky sessions.
@@ -18,6 +17,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { FastifyRequest, FastifyReply } from "fastify";
 import type postgres from "postgres";
 import { registerTools } from "./tools/index.js";
+import { resolveToken } from "./db/users.js";
+import { hashToken } from "./oauth/tokens.js";
 
 /** Package metadata surfaced in the MCP server info. */
 const SERVER_INFO = {
@@ -42,25 +43,37 @@ const SERVER_CAPABILITIES = {
 export function createMcpRequestHandler(db: postgres.Sql) {
   /**
    * Handles a single POST /mcp request.
-   * Extracts the user ID from the Authorization bearer token, creates a
-   * stateless transport + server, registers all tools, and processes the request.
+   * Hashes the bearer token, resolves it to a user ID via the database,
+   * creates a stateless transport + server, registers tools, and processes
+   * the request.
    */
   return async function handleMcpRequest(
     request: FastifyRequest,
     reply: FastifyReply
   ): Promise<void> {
-    // Extract user ID from the Authorization: Bearer <userId> header.
     const authHeader = request.headers.authorization ?? "";
-    const userId = authHeader.startsWith("Bearer ")
+    const rawToken = authHeader.startsWith("Bearer ")
       ? authHeader.slice("Bearer ".length).trim()
       : null;
+
+    if (!rawToken) {
+      return reply.status(401).send({
+        error: "unauthorized",
+        message:
+          "Missing or invalid Authorization header. " +
+          "Include your bearer token: Authorization: Bearer <token>",
+      });
+    }
+
+    const tokenHash = hashToken(rawToken);
+    const userId = await resolveToken(db, tokenHash);
 
     if (!userId) {
       return reply.status(401).send({
         error: "unauthorized",
         message:
-          "Missing or invalid Authorization header. " +
-          "Include your user ID as a Bearer token: Authorization: Bearer <userId>",
+          "Bearer token is invalid or has been revoked. " +
+          "Please re-authenticate via /oauth/authorize.",
       });
     }
 
@@ -73,7 +86,6 @@ export function createMcpRequestHandler(db: postgres.Sql) {
       capabilities: SERVER_CAPABILITIES,
     });
 
-    // Register all tools, closing over the userId for this request.
     registerTools(server, db, () => userId);
 
     try {
