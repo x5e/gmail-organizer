@@ -16,6 +16,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import { config } from "../config.js";
 import { encrypt, decrypt } from "../crypto.js";
 import {
@@ -29,6 +30,15 @@ import type postgres from "postgres";
 
 /** Google OAuth token endpoint. */
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
+
+/** Google's JWKS endpoint for id_token signature verification. */
+const GOOGLE_JWKS_URI = new URL("https://www.googleapis.com/oauth2/v3/certs");
+
+/** Expected issuer in Google id_tokens. */
+const GOOGLE_ISSUER = "https://accounts.google.com";
+
+/** Cached JWKS fetcher — lazily retrieves and caches Google's public keys. */
+const googleJwks = createRemoteJWKSet(GOOGLE_JWKS_URI);
 
 /** How many seconds before expiry to proactively refresh. */
 const REFRESH_BUFFER_SECONDS = 5 * 60; // 5 minutes
@@ -48,15 +58,24 @@ export interface ExchangeResult {
 }
 
 /**
- * Decodes the payload section of a JWT without signature verification.
- * Safe here because we received the token directly from Google's token
- * endpoint over HTTPS — the TLS connection already authenticates the issuer.
+ * Verifies a Google id_token: checks the JWT signature against Google's JWKS,
+ * validates standard claims (iss, aud, exp, iat), and rejects unverified emails.
  */
-function decodeIdTokenPayload(idToken: string): { email?: string; email_verified?: boolean } {
-  const parts = idToken.split(".");
-  if (parts.length !== 3) throw new Error("Malformed id_token: expected 3 parts");
-  const payload = Buffer.from(parts[1]!, "base64url").toString("utf8");
-  return JSON.parse(payload);
+async function verifyIdToken(idToken: string): Promise<{ email: string }> {
+  const { payload } = await jwtVerify(idToken, googleJwks, {
+    issuer: GOOGLE_ISSUER,
+    audience: config.googleClientId,
+  });
+
+  if (payload.email_verified !== true) {
+    throw new Error("id_token email is not verified.");
+  }
+
+  if (typeof payload.email !== "string" || !payload.email) {
+    throw new Error("id_token does not contain an email claim.");
+  }
+
+  return { email: payload.email };
 }
 
 /** SHA-256 hash a string and return the hex digest. */
@@ -120,12 +139,9 @@ export async function exchangeCodeForTokens(
     );
   }
 
-  const idPayload = decodeIdTokenPayload(tokens.id_token);
-  if (!idPayload.email) {
-    throw new Error("id_token does not contain an email claim.");
-  }
+  const { email } = await verifyIdToken(tokens.id_token);
 
-  const userId = await findOrCreateUserByEmail(db, idPayload.email);
+  const userId = await findOrCreateUserByEmail(db, email);
 
   const encryptedRefreshToken = encrypt(
     tokens.refresh_token,

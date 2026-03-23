@@ -15,6 +15,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
+import { http, HttpResponse } from "msw";
 import { exchangeCodeForTokens, getValidAccessToken, hashToken } from "./tokens.js";
 import {
   createTestDb,
@@ -22,10 +23,12 @@ import {
   createTestUserWithTokens,
 } from "../test/db-helpers.js";
 import { resolveToken } from "../db/users.js";
+import { mswServer } from "../mocks/server.js";
 import {
   MOCK_ACCESS_TOKEN,
   MOCK_REFRESH_TOKEN,
   MOCK_NEW_ACCESS_TOKEN,
+  buildMockIdToken,
 } from "../mocks/handlers/google-oauth.js";
 
 const db = createTestDb();
@@ -192,5 +195,62 @@ describe("re-authentication", () => {
 
     const tokens = await db`SELECT token_hash FROM bearer_tokens`;
     expect(tokens).toHaveLength(2);
+  });
+});
+
+describe("id_token validation", () => {
+  function overrideTokenEndpointWith(idToken: string) {
+    mswServer.use(
+      http.post("https://oauth2.googleapis.com/token", async () => {
+        return HttpResponse.json({
+          access_token: MOCK_ACCESS_TOKEN,
+          expires_in: 3600,
+          refresh_token: MOCK_REFRESH_TOKEN,
+          id_token: idToken,
+          token_type: "Bearer",
+        });
+      })
+    );
+  }
+
+  const exchangeArgs = {
+    code: "valid_auth_code",
+    codeVerifier: "test-verifier",
+    redirectUri: "http://localhost:3000/oauth/callback",
+  } as const;
+
+  it("rejects a token with email_verified: false", async () => {
+    const badToken = await buildMockIdToken("unverified@example.com", {
+      email_verified: false,
+    });
+    overrideTokenEndpointWith(badToken);
+
+    await expect(exchangeCodeForTokens(db, exchangeArgs)).rejects.toThrow(
+      /email is not verified/
+    );
+  });
+
+  it("rejects an expired token", async () => {
+    const past = Math.floor(Date.now() / 1000) - 3600;
+    const badToken = await buildMockIdToken("expired@example.com", {
+      iat: past - 3600,
+      exp: past,
+    });
+    overrideTokenEndpointWith(badToken);
+
+    await expect(exchangeCodeForTokens(db, exchangeArgs)).rejects.toThrow(
+      /exp/i
+    );
+  });
+
+  it("rejects a token with the wrong audience", async () => {
+    const badToken = await buildMockIdToken("wrong-aud@example.com", {
+      aud: "not-our-client-id",
+    });
+    overrideTokenEndpointWith(badToken);
+
+    await expect(exchangeCodeForTokens(db, exchangeArgs)).rejects.toThrow(
+      /aud/i
+    );
   });
 });
