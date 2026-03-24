@@ -570,7 +570,3 @@ For the project overview and context, see [`OVERVIEW.md`](OVERVIEW.md).
 For a detailed cost analysis of all hosting options, see [`HOSTING_OPTIONS.md`](HOSTING_OPTIONS.md).
 
 ---
-
-## License
-
-[MIT](LICENSE)
