@@ -10,6 +10,7 @@
 
 import { describe, it, expect } from "vitest";
 import { assertNoBlockedLabels, assertLabelsExist } from "./validation.js";
+import { GmailApiError } from "../gmail/client.js";
 
 // The mock Gmail labels handler is active via test setup (MSW).
 
@@ -75,10 +76,12 @@ describe("assertLabelsExist", () => {
     ).rejects.toThrow(/BAD_1/);
   });
 
-  it("throws when the Gmail API returns 401", async () => {
+  it("throws GmailApiError when the Gmail API returns 401", async () => {
     // "invalid-token" triggers a 401 in the MSW label handler.
+    // The GmailApiError must propagate directly (not wrapped) so that
+    // withGmailRetry can detect the 401 status and force-refresh the token.
     await expect(
       assertLabelsExist("invalid-token", ["INBOX"])
-    ).rejects.toThrow(/Failed to fetch label list/);
+    ).rejects.toThrow(GmailApiError);
   });
 });

@@ -55,6 +55,9 @@ export async function assertLabelsExist(
     allLabels = await listLabels(accessToken);
   } catch (err) {
     if (err instanceof GmailApiError) {
+      // Let 401s propagate as GmailApiError so that the caller's retry logic
+      // (withGmailRetry) can detect the status code and force-refresh the token.
+      if (err.status === 401) throw err;
       throw new Error(
         `Failed to fetch label list for validation: ${err.message}`
       );
