@@ -437,7 +437,7 @@ describe("error handling in write tools", () => {
     });
     const body = await callTool(bearerToken, "list_labels");
     expect(body.result?.isError).toBe(true);
-    expect(body.result?.content?.[0]?.text).toMatch(/Token refresh failed|re-authenticate/i);
+    expect(body.result?.content?.[0]?.text).toMatch(/authorization/i);
   });
 });
 

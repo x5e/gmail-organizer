@@ -100,7 +100,30 @@ async function withGmailRetry<T>(
     return await fn(token);
   } catch (err) {
     if (err instanceof GmailApiError && err.status === 401) {
-      const freshToken = await forceRefreshAccessToken(db, userId);
+      let freshToken: string;
+      try {
+        freshToken = await forceRefreshAccessToken(db, userId);
+      } catch (refreshErr) {
+        // Classify the refresh failure. Only known auth-rejection responses
+        // from Google's token endpoint (400 invalid_grant, 401 unauthorized)
+        // mean the refresh token is revoked/expired — surface a clean reauth
+        // prompt. Everything else (network errors, 5xx, other 4xx like 429
+        // rate-limiting) is operational and should propagate as-is.
+        const msg = refreshErr instanceof Error ? refreshErr.message : String(refreshErr);
+        const isAuthRejection =
+          /\(400\)/.test(msg) && /invalid_grant/i.test(msg) ||
+          /\(401\)/.test(msg);
+        if (isAuthRejection) {
+          // Use a fixed, user-safe message — never include the raw OAuth
+          // response body which may contain internal token-endpoint details.
+          throw new GmailApiError(
+            401,
+            "Refresh token is no longer valid"
+          );
+        }
+        // Network error, 5xx, rate-limit, or anything else — not an auth issue.
+        throw refreshErr;
+      }
       return fn(freshToken);
     }
     throw err;

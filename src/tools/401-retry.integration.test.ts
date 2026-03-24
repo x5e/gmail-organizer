@@ -24,8 +24,10 @@ import {
   createTestUserWithTokens,
   truncateAllTables,
 } from "../test/db-helpers.js";
-import { INVALID_ACCESS_TOKEN } from "../mocks/handlers/gmail-labels.js";
-import { MOCK_LABELS } from "../mocks/handlers/gmail-labels.js";
+import {
+  INVALID_ACCESS_TOKEN,
+  MOCK_LABELS,
+} from "../mocks/handlers/gmail-labels.js";
 
 const db = createTestDb();
 
@@ -92,28 +94,30 @@ async function callTool(
   return parseMcpBody(response.body);
 }
 
+/** Creates a test user whose cached access token triggers 401 in MSW. */
+function revokedTokenUser(refreshToken = "mock-refresh-token-abc") {
+  return createTestUserWithTokens(db, {
+    accessToken: INVALID_ACCESS_TOKEN,
+    accessTokenExpiresAt: new Date(Date.now() + 3_600_000), // 1 hour — no proactive refresh
+    refreshToken,
+  });
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe("post-401 token refresh and retry", () => {
-  it("retries list_labels after a 401 from Gmail and returns labels on the second attempt", async () => {
-    // The user's cached access token is "invalid-token" — still well within its
-    // expiry window, so proactive refresh does NOT fire. Gmail returns 401 for it.
-    // The connector should force-refresh (using the valid refresh token) and retry.
-    const { bearerToken } = await createTestUserWithTokens(db, {
-      accessToken: INVALID_ACCESS_TOKEN,          // triggers 401 in MSW Gmail handlers
-      accessTokenExpiresAt: new Date(Date.now() + 3_600_000), // 1 hour away — no proactive refresh
-      refreshToken: "mock-refresh-token-abc",     // accepted by the MSW OAuth handler
-    });
+  // ── Read-only tool path ───────────────────────────────────────────────────
+
+  it("retries list_labels after a 401 and returns labels on the second attempt", async () => {
+    const { bearerToken } = await revokedTokenUser();
 
     const parsed = (await callTool(bearerToken, "list_labels")) as {
       result?: { content?: Array<{ type: string; text: string }> };
       error?: unknown;
     };
 
-    // No JSON-RPC error.
     expect(parsed.error).toBeUndefined();
 
-    // The result should contain the label list from the MSW mock.
     const content = parsed.result?.content;
     expect(content).toBeDefined();
     expect(content![0]!.type).toBe("text");
@@ -122,28 +126,47 @@ describe("post-401 token refresh and retry", () => {
     expect(labels).toHaveLength(MOCK_LABELS.length);
   });
 
-  it("surfaces an auth error when the refresh token is also invalid", async () => {
-    // Same initial state: "invalid-token" causes a 401 from Gmail.
-    // But the refresh token is "invalid_refresh_token" — the MSW OAuth handler
-    // returns 400 for it, so the forced refresh also fails.
-    const { bearerToken } = await createTestUserWithTokens(db, {
-      accessToken: INVALID_ACCESS_TOKEN,
-      accessTokenExpiresAt: new Date(Date.now() + 3_600_000),
-      refreshToken: "invalid_refresh_token",      // MSW OAuth handler returns 400
-    });
+  // ── Write tool path (assertLabelsExist hits 401 first) ────────────────────
+
+  it("retries modify_message_labels when assertLabelsExist triggers the 401", async () => {
+    // The first Gmail call inside the withGmailRetry closure is assertLabelsExist,
+    // which calls listLabels(). With the "invalid-token" access token, that call
+    // returns 401 via the GmailApiError that now propagates from assertLabelsExist.
+    // withGmailRetry should catch it, force-refresh, and retry the whole closure
+    // (assertLabelsExist + modifyMessageLabels) with the fresh token.
+    const { bearerToken } = await revokedTokenUser();
+
+    const parsed = (await callTool(bearerToken, "modify_message_labels", {
+      messageId: "msg_001",
+      addLabelIds: ["Label_1"],
+    })) as {
+      result?: { content?: Array<{ type: string; text: string }> };
+      error?: unknown;
+    };
+
+    expect(parsed.error).toBeUndefined();
+
+    const content = parsed.result?.content;
+    expect(content).toBeDefined();
+    const body = JSON.parse(content![0]!.text);
+    expect(body.success).toBe(true);
+  });
+
+  // ── Refresh-token failure path ────────────────────────────────────────────
+
+  it("surfaces a normalized authorization error when the refresh token is also invalid", async () => {
+    // Access token → 401 from Gmail, refresh token → 400 from Google OAuth.
+    // The error should be wrapped into a GmailApiError(401) by withGmailRetry
+    // and then normalized by handleToolError into a clean auth error.
+    const { bearerToken } = await revokedTokenUser("invalid_refresh_token");
 
     const parsed = (await callTool(bearerToken, "list_labels")) as {
       result?: { isError?: boolean; content?: Array<{ type: string; text: string }> };
       error?: unknown;
     };
 
-    // The tool should not silently succeed.
-    // MCP tool errors surface either as a JSON-RPC error or as isError content.
-    const hasError =
-      parsed.error !== undefined ||
-      parsed.result?.isError === true ||
-      (parsed.result?.content?.[0]?.text ?? "").toLowerCase().includes("error");
-
-    expect(hasError).toBe(true);
+    expect(parsed.result?.isError).toBe(true);
+    expect(parsed.result?.content?.[0]?.text).toMatch(/authorization/i);
+    expect(parsed.result?.content?.[0]?.text).toMatch(/re-authenticate/i);
   });
 });
