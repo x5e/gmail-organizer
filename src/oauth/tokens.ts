@@ -25,6 +25,7 @@ import {
   upsertOAuthTokens,
   updateAccessToken,
   getOAuthTokens,
+  type OAuthTokenRow,
 } from "../db/users.js";
 import type postgres from "postgres";
 
@@ -191,7 +192,47 @@ export async function getValidAccessToken(
     return tokenRow.accessToken;
   }
 
-  // Decrypt the refresh token and get a new access token from Google.
+  // Proactive refresh: token is near or past expiry.
+  return doRefresh(db, userId, tokenRow);
+}
+
+/**
+ * Forces an immediate access token refresh, bypassing the expiry check.
+ *
+ * Call this after receiving a 401 from the Gmail API to recover from tokens
+ * that became invalid before their local expiry timestamp (e.g. due to
+ * revocation, clock skew, or unexpected server-side auth state changes).
+ *
+ * Throws if the user has no token row or if the Google refresh request fails.
+ */
+export async function forceRefreshAccessToken(
+  db: postgres.Sql,
+  userId: string
+): Promise<string> {
+  const tokenRow = await getOAuthTokens(db, userId);
+
+  if (!tokenRow) {
+    throw new Error(
+      `No OAuth tokens found for user ${userId}. ` +
+        "The user needs to re-authenticate."
+    );
+  }
+
+  return doRefresh(db, userId, tokenRow);
+}
+
+/**
+ * Decrypts the stored refresh token, exchanges it for a new access token,
+ * persists the result, and returns the new access token.
+ *
+ * Shared by getValidAccessToken (proactive refresh) and forceRefreshAccessToken
+ * (post-401 forced refresh).
+ */
+async function doRefresh(
+  db: postgres.Sql,
+  userId: string,
+  tokenRow: OAuthTokenRow
+): Promise<string> {
   const refreshToken = decrypt(
     tokenRow.encryptedRefreshToken,
     config.tokenEncryptionKey

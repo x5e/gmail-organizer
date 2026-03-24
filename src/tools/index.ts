@@ -21,15 +21,19 @@
  *
  * Each tool handler:
  *   1. Extracts the user ID from the MCP request context (bearer token).
- *   2. Retrieves a valid access token (refreshing if needed).
- *   3. Calls the Gmail API.
- *   4. Returns a structured result.
+ *   2. Calls withGmailRetry, which:
+ *        a. Retrieves a valid access token (refreshing proactively if near expiry).
+ *        b. Calls the Gmail API.
+ *        c. On a 401 response, force-refreshes the token and retries once.
+ *           This handles tokens invalidated before their local expiry timestamp
+ *           (revocation, clock skew, unexpected auth state changes).
+ *   3. Returns a structured result.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type postgres from "postgres";
-import { getValidAccessToken } from "../oauth/tokens.js";
+import { getValidAccessToken, forceRefreshAccessToken } from "../oauth/tokens.js";
 import * as gmail from "../gmail/client.js";
 import { assertNoBlockedLabels, assertLabelsExist } from "./validation.js";
 import { GmailApiError, base64UrlToBase64 } from "../gmail/client.js";
@@ -80,6 +84,30 @@ function handleToolError(err: unknown): never {
 }
 
 /**
+ * Calls fn with a valid access token. If Gmail returns 401, force-refreshes
+ * the token and retries fn exactly once before failing.
+ *
+ * This handles the case where a cached token becomes invalid before its local
+ * expiry timestamp (e.g. revocation, clock skew, unexpected auth state change).
+ */
+async function withGmailRetry<T>(
+  db: postgres.Sql,
+  userId: string,
+  fn: (token: string) => Promise<T>
+): Promise<T> {
+  const token = await getValidAccessToken(db, userId);
+  try {
+    return await fn(token);
+  } catch (err) {
+    if (err instanceof GmailApiError && err.status === 401) {
+      const freshToken = await forceRefreshAccessToken(db, userId);
+      return fn(freshToken);
+    }
+    throw err;
+  }
+}
+
+/**
  * Registers all Gmail MCP tools on the provided MCP server.
  *
  * @param server - The MCP server instance to register tools on.
@@ -100,9 +128,10 @@ export function registerTools(
     { readOnlyHint: true },
     async () => {
       const userId = getUserId();
-      const accessToken = await getValidAccessToken(db, userId);
       try {
-        const labels = await gmail.listLabels(accessToken);
+        const labels = await withGmailRetry(db, userId, (token) =>
+          gmail.listLabels(token)
+        );
         return {
           content: [
             {
@@ -139,13 +168,10 @@ export function registerTools(
     { readOnlyHint: true },
     async ({ q, maxResults, pageToken }) => {
       const userId = getUserId();
-      const accessToken = await getValidAccessToken(db, userId);
       try {
-        const result = await gmail.searchMessages(accessToken, {
-          q,
-          maxResults,
-          pageToken,
-        });
+        const result = await withGmailRetry(db, userId, (token) =>
+          gmail.searchMessages(token, { q, maxResults, pageToken })
+        );
         return {
           content: [
             {
@@ -189,14 +215,10 @@ export function registerTools(
     { readOnlyHint: true },
     async ({ q, labelIds, maxResults, pageToken }) => {
       const userId = getUserId();
-      const accessToken = await getValidAccessToken(db, userId);
       try {
-        const result = await gmail.listThreads(accessToken, {
-          q,
-          labelIds,
-          maxResults,
-          pageToken,
-        });
+        const result = await withGmailRetry(db, userId, (token) =>
+          gmail.listThreads(token, { q, labelIds, maxResults, pageToken })
+        );
         return {
           content: [
             {
@@ -230,9 +252,10 @@ export function registerTools(
     { readOnlyHint: true },
     async ({ messageId, format }) => {
       const userId = getUserId();
-      const accessToken = await getValidAccessToken(db, userId);
       try {
-        const message = await gmail.getMessage(accessToken, messageId, format);
+        const message = await withGmailRetry(db, userId, (token) =>
+          gmail.getMessage(token, messageId, format)
+        );
         return {
           content: [
             {
@@ -271,12 +294,18 @@ export function registerTools(
     { readOnlyHint: true },
     async ({ messageId, attachmentId, maxBytes }) => {
       const userId = getUserId();
-      const accessToken = await getValidAccessToken(db, userId);
       try {
-        const [attachment, message] = await Promise.all([
-          gmail.getAttachment(accessToken, messageId, attachmentId),
-          gmail.getMessage(accessToken, messageId, "full"),
-        ]);
+        const { attachment, message } = await withGmailRetry(
+          db,
+          userId,
+          async (token) => {
+            const [attachment, message] = await Promise.all([
+              gmail.getAttachment(token, messageId, attachmentId),
+              gmail.getMessage(token, messageId, "full"),
+            ]);
+            return { attachment, message };
+          }
+        );
 
         // Resolve the MIME type from the message's part tree.
         const mimeType =
@@ -341,9 +370,10 @@ export function registerTools(
     { readOnlyHint: true },
     async ({ threadId }) => {
       const userId = getUserId();
-      const accessToken = await getValidAccessToken(db, userId);
       try {
-        const thread = await gmail.getThread(accessToken, threadId);
+        const thread = await withGmailRetry(db, userId, (token) =>
+          gmail.getThread(token, threadId)
+        );
         return {
           content: [
             {
@@ -384,13 +414,10 @@ export function registerTools(
     { readOnlyHint: true },
     async ({ startHistoryId, maxResults, pageToken }) => {
       const userId = getUserId();
-      const accessToken = await getValidAccessToken(db, userId);
       try {
-        const history = await gmail.getHistory(accessToken, {
-          startHistoryId,
-          maxResults,
-          pageToken,
-        });
+        const history = await withGmailRetry(db, userId, (token) =>
+          gmail.getHistory(token, { startHistoryId, maxResults, pageToken })
+        );
         return {
           content: [
             {
@@ -414,9 +441,10 @@ export function registerTools(
     { readOnlyHint: true },
     async () => {
       const userId = getUserId();
-      const accessToken = await getValidAccessToken(db, userId);
       try {
-        const profile = await gmail.getProfile(accessToken);
+        const profile = await withGmailRetry(db, userId, (token) =>
+          gmail.getProfile(token)
+        );
         return {
           content: [
             {
@@ -454,17 +482,16 @@ export function registerTools(
       assertNoBlockedLabels(addLabelIds, removeLabelIds);
 
       const userId = getUserId();
-      const accessToken = await getValidAccessToken(db, userId);
-
       const allLabelIds = [...(addLabelIds ?? []), ...(removeLabelIds ?? [])];
-      await assertLabelsExist(accessToken, allLabelIds);
 
       try {
-        const message = await gmail.modifyMessageLabels(
-          accessToken,
-          messageId,
-          { addLabelIds, removeLabelIds }
-        );
+        const message = await withGmailRetry(db, userId, async (token) => {
+          await assertLabelsExist(token, allLabelIds);
+          return gmail.modifyMessageLabels(token, messageId, {
+            addLabelIds,
+            removeLabelIds,
+          });
+        });
         return {
           content: [
             {
@@ -510,17 +537,16 @@ export function registerTools(
       assertNoBlockedLabels(addLabelIds, removeLabelIds);
 
       const userId = getUserId();
-      const accessToken = await getValidAccessToken(db, userId);
-
       const allLabelIds = [...(addLabelIds ?? []), ...(removeLabelIds ?? [])];
-      await assertLabelsExist(accessToken, allLabelIds);
 
       try {
-        const thread = await gmail.modifyThreadLabels(
-          accessToken,
-          threadId,
-          { addLabelIds, removeLabelIds }
-        );
+        const thread = await withGmailRetry(db, userId, async (token) => {
+          await assertLabelsExist(token, allLabelIds);
+          return gmail.modifyThreadLabels(token, threadId, {
+            addLabelIds,
+            removeLabelIds,
+          });
+        });
         return {
           content: [
             {
@@ -570,16 +596,16 @@ export function registerTools(
       assertNoBlockedLabels(addLabelIds, removeLabelIds);
 
       const userId = getUserId();
-      const accessToken = await getValidAccessToken(db, userId);
-
       const allLabelIds = [...(addLabelIds ?? []), ...(removeLabelIds ?? [])];
-      await assertLabelsExist(accessToken, allLabelIds);
 
       try {
-        await gmail.batchModifyMessageLabels(accessToken, {
-          ids,
-          addLabelIds,
-          removeLabelIds,
+        await withGmailRetry(db, userId, async (token) => {
+          await assertLabelsExist(token, allLabelIds);
+          return gmail.batchModifyMessageLabels(token, {
+            ids,
+            addLabelIds,
+            removeLabelIds,
+          });
         });
         return {
           content: [

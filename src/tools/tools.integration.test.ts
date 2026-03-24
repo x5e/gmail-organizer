@@ -426,15 +426,18 @@ describe("error handling in write tools", () => {
     expect(body.result?.content?.[0]?.text).toMatch(/not found/i);
   });
 
-  it("tools return 401 error message when access token is rejected by Gmail API", async () => {
+  it("tools return auth error when both the access token and refresh token are rejected", async () => {
     // Store "invalid-token" as the access token — MSW rejects it with 401.
+    // The refresh token is also invalid, so the forced refresh also fails.
+    // Only then should an authorization error surface.
     const { bearerToken } = await createTestUserWithTokens(db, {
       accessToken: "invalid-token",
       accessTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      refreshToken: "invalid_refresh_token", // MSW OAuth handler returns 400
     });
     const body = await callTool(bearerToken, "list_labels");
     expect(body.result?.isError).toBe(true);
-    expect(body.result?.content?.[0]?.text).toMatch(/authorization/i);
+    expect(body.result?.content?.[0]?.text).toMatch(/Token refresh failed|re-authenticate/i);
   });
 });
 
