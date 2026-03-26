@@ -124,7 +124,7 @@ export async function exchangeCodeForTokens(
     throw new Error(`Token exchange failed (${response.status}): ${body}`);
   }
 
-  const tokens: TokenResponse = await response.json();
+  const tokens = (await response.json()) as TokenResponse;
 
   if (!tokens.refresh_token) {
     throw new Error(
