@@ -3,6 +3,10 @@
  *
  * Unit tests for the withAuditLog wrapper that provides structured audit
  * logging for all MCP tool invocations.
+ *
+ * Tests cover both the logging behavior (correct level, fields, write details)
+ * and the error normalization (GmailApiError → user-friendly plain Error via
+ * handleToolError, which runs AFTER the audit log captures the original error).
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -92,12 +96,14 @@ describe("withAuditLog", () => {
     );
   });
 
-  it("logs GmailApiError 4xx at warn level", async () => {
+  it("logs GmailApiError 4xx at warn level with errorStatus", async () => {
     const error = new GmailApiError(404, "Not found");
     const handler = vi.fn().mockRejectedValue(error);
     const wrapped = withAuditLog("get_message", logger, () => "user-123", handler);
 
-    await expect(wrapped({})).rejects.toThrow(error);
+    // The wrapper logs the original GmailApiError at warn, then handleToolError
+    // converts it to a plain Error for the MCP response.
+    await expect(wrapped({})).rejects.toThrow("Gmail resource not found");
 
     expect(logger.warn).toHaveBeenCalledOnce();
     expect(logger.warn).toHaveBeenCalledWith(
@@ -113,12 +119,12 @@ describe("withAuditLog", () => {
     );
   });
 
-  it("logs GmailApiError 5xx at error level", async () => {
+  it("logs GmailApiError 5xx at error level with errorStatus", async () => {
     const error = new GmailApiError(500, "Internal server error");
     const handler = vi.fn().mockRejectedValue(error);
     const wrapped = withAuditLog("list_labels", logger, () => "user-123", handler);
 
-    await expect(wrapped({})).rejects.toThrow(error);
+    await expect(wrapped({})).rejects.toThrow("Gmail API error");
 
     expect(logger.error).toHaveBeenCalledOnce();
     expect(logger.error).toHaveBeenCalledWith(
@@ -133,12 +139,12 @@ describe("withAuditLog", () => {
     );
   });
 
-  it("logs non-Gmail errors at error level", async () => {
+  it("logs non-Gmail errors at error level without errorStatus", async () => {
     const error = new Error("unexpected failure");
     const handler = vi.fn().mockRejectedValue(error);
     const wrapped = withAuditLog("list_labels", logger, () => "user-123", handler);
 
-    await expect(wrapped({})).rejects.toThrow(error);
+    await expect(wrapped({})).rejects.toThrow("unexpected failure");
 
     expect(logger.error).toHaveBeenCalledOnce();
     expect(logger.error).toHaveBeenCalledWith(
@@ -155,13 +161,15 @@ describe("withAuditLog", () => {
     expect(payload).not.toHaveProperty("errorStatus");
   });
 
-  it("re-throws the original error after logging", async () => {
-    const error = new GmailApiError(429, "Rate limited");
-    const handler = vi.fn().mockRejectedValue(error);
+  it("normalizes GmailApiError into user-friendly Error via handleToolError", async () => {
+    const handler = vi.fn().mockRejectedValue(new GmailApiError(429, "Rate limited"));
     const wrapped = withAuditLog("search_messages", logger, () => "user-1", handler);
 
+    // handleToolError converts 429 to a user-friendly message
     const thrown = await wrapped({}).catch((e: unknown) => e);
-    expect(thrown).toBe(error);
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown).not.toBeInstanceOf(GmailApiError);
+    expect((thrown as Error).message).toMatch(/rate limit/i);
   });
 
   it("does not include write details on failure for write tools", async () => {
@@ -175,7 +183,7 @@ describe("withAuditLog", () => {
       (args: { messageId: string }) => ({ messageIds: [args.messageId] })
     );
 
-    await expect(wrapped({ messageId: "msg_1" })).rejects.toThrow(error);
+    await expect(wrapped({ messageId: "msg_1" })).rejects.toThrow();
 
     // Failure logs should not contain write details (the operation didn't succeed)
     const payload = logger.warn.mock.calls[0][0] as Record<string, unknown>;
@@ -237,6 +245,25 @@ describe("withAuditLog", () => {
         addLabelIds: ["IMPORTANT"],
       }),
       "tool invocation"
+    );
+  });
+
+  it("logs GmailApiError 401 at warn level before normalizing to auth error", async () => {
+    const error = new GmailApiError(401, "Token expired");
+    const handler = vi.fn().mockRejectedValue(error);
+    const wrapped = withAuditLog("get_profile", logger, () => "user-123", handler);
+
+    await expect(wrapped({})).rejects.toThrow(/authorization/i);
+
+    expect(logger.warn).toHaveBeenCalledOnce();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tool: "get_profile",
+        userId: "user-123",
+        success: false,
+        errorStatus: 401,
+      }),
+      "tool invocation failed"
     );
   });
 });

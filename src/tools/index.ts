@@ -86,13 +86,17 @@ function handleToolError(err: unknown): never {
 }
 
 /**
- * Wraps a tool handler with structured audit logging.
+ * Wraps a tool handler with structured audit logging and error normalization.
  *
  * Logs at `info` on success with user ID, tool name, duration, and (for write
  * tools) affected resource IDs and label changes. Logs at `warn` for expected
  * Gmail errors (4xx) and `error` for unexpected failures (5xx, non-Gmail).
- * Always re-throws so that handleToolError still processes the error for the
- * MCP response.
+ *
+ * After logging, converts `GmailApiError` into user-friendly plain `Error`
+ * messages via `handleToolError`. This ordering is critical: the wrapper must
+ * see the original `GmailApiError` before it is normalized, so that error
+ * classification (4xx → warn, 5xx → error) and `errorStatus` capture work
+ * correctly.
  */
 export function withAuditLog<T>(
   toolName: string,
@@ -150,7 +154,9 @@ export function withAuditLog<T>(
         );
       }
 
-      throw err;
+      // Normalize the error into a user-friendly message for the MCP response.
+      // This must happen AFTER logging so the original GmailApiError is captured.
+      handleToolError(err);
     }
   };
 }
@@ -224,21 +230,17 @@ export function registerTools(
     { readOnlyHint: true },
     withAuditLog("list_labels", logger, getUserId, async () => {
       const userId = getUserId();
-      try {
-        const labels = await withGmailRetry(db, userId, (token) =>
-          gmail.listLabels(token)
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(labels, null, 2),
-            },
-          ],
-        };
-      } catch (err) {
-        handleToolError(err);
-      }
+      const labels = await withGmailRetry(db, userId, (token) =>
+        gmail.listLabels(token)
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(labels, null, 2),
+          },
+        ],
+      };
     })
   );
 
@@ -264,21 +266,17 @@ export function registerTools(
     { readOnlyHint: true },
     withAuditLog("search_messages", logger, getUserId, async ({ q, maxResults, pageToken }) => {
       const userId = getUserId();
-      try {
-        const result = await withGmailRetry(db, userId, (token) =>
-          gmail.searchMessages(token, { q, maxResults, pageToken })
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
-      } catch (err) {
-        handleToolError(err);
-      }
+      const result = await withGmailRetry(db, userId, (token) =>
+        gmail.searchMessages(token, { q, maxResults, pageToken })
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
     })
   );
 
@@ -311,21 +309,17 @@ export function registerTools(
     { readOnlyHint: true },
     withAuditLog("list_threads", logger, getUserId, async ({ q, labelIds, maxResults, pageToken }) => {
       const userId = getUserId();
-      try {
-        const result = await withGmailRetry(db, userId, (token) =>
-          gmail.listThreads(token, { q, labelIds, maxResults, pageToken })
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
-      } catch (err) {
-        handleToolError(err);
-      }
+      const result = await withGmailRetry(db, userId, (token) =>
+        gmail.listThreads(token, { q, labelIds, maxResults, pageToken })
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
     })
   );
 
@@ -348,21 +342,17 @@ export function registerTools(
     { readOnlyHint: true },
     withAuditLog("get_message", logger, getUserId, async ({ messageId, format }) => {
       const userId = getUserId();
-      try {
-        const message = await withGmailRetry(db, userId, (token) =>
-          gmail.getMessage(token, messageId, format)
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(message, null, 2),
-            },
-          ],
-        };
-      } catch (err) {
-        handleToolError(err);
-      }
+      const message = await withGmailRetry(db, userId, (token) =>
+        gmail.getMessage(token, messageId, format)
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(message, null, 2),
+          },
+        ],
+      };
     })
   );
 
@@ -390,68 +380,64 @@ export function registerTools(
     { readOnlyHint: true },
     withAuditLog("get_attachment", logger, getUserId, async ({ messageId, attachmentId, maxBytes }) => {
       const userId = getUserId();
-      try {
-        const { attachment, message } = await withGmailRetry(
-          db,
-          userId,
-          async (token) => {
-            const [attachment, message] = await Promise.all([
-              gmail.getAttachment(token, messageId, attachmentId),
-              gmail.getMessage(token, messageId, "full"),
-            ]);
-            return { attachment, message };
-          }
-        );
-
-        // Resolve the MIME type from the message's part tree.
-        const mimeType =
-          findPartMimeType(message.payload, attachmentId) ??
-          "application/octet-stream";
-
-        // Convert base64url → padded standard base64.
-        const base64 = base64UrlToBase64(attachment.data ?? "");
-        const decoded = Buffer.from(base64, "base64");
-
-        let truncated = false;
-        let content: string;
-
-        if (mimeType.startsWith("text/")) {
-          // Safe to interpret as UTF-8 text.
-          if (decoded.length > maxBytes) {
-            content = decoded.subarray(0, maxBytes).toString("utf8");
-            truncated = true;
-          } else {
-            content = decoded.toString("utf8");
-          }
-        } else {
-          // Binary content: return as standard base64 to avoid UTF-8 corruption.
-          if (decoded.length > maxBytes) {
-            content = decoded.subarray(0, maxBytes).toString("base64");
-            truncated = true;
-          } else {
-            content = base64;
-          }
+      const { attachment, message } = await withGmailRetry(
+        db,
+        userId,
+        async (token) => {
+          const [attachment, message] = await Promise.all([
+            gmail.getAttachment(token, messageId, attachmentId),
+            gmail.getMessage(token, messageId, "full"),
+          ]);
+          return { attachment, message };
         }
+      );
 
-        const result = {
-          mimeType,
-          size: attachment.size,
-          truncated,
-          returnedBytes: Math.min(decoded.length, maxBytes),
-          data: content,
-        };
+      // Resolve the MIME type from the message's part tree.
+      const mimeType =
+        findPartMimeType(message.payload, attachmentId) ??
+        "application/octet-stream";
 
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
-      } catch (err) {
-        handleToolError(err);
+      // Convert base64url → padded standard base64.
+      const base64 = base64UrlToBase64(attachment.data ?? "");
+      const decoded = Buffer.from(base64, "base64");
+
+      let truncated = false;
+      let content: string;
+
+      if (mimeType.startsWith("text/")) {
+        // Safe to interpret as UTF-8 text.
+        if (decoded.length > maxBytes) {
+          content = decoded.subarray(0, maxBytes).toString("utf8");
+          truncated = true;
+        } else {
+          content = decoded.toString("utf8");
+        }
+      } else {
+        // Binary content: return as standard base64 to avoid UTF-8 corruption.
+        if (decoded.length > maxBytes) {
+          content = decoded.subarray(0, maxBytes).toString("base64");
+          truncated = true;
+        } else {
+          content = base64;
+        }
       }
+
+      const result = {
+        mimeType,
+        size: attachment.size,
+        truncated,
+        returnedBytes: Math.min(decoded.length, maxBytes),
+        data: content,
+      };
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
     })
   );
 
@@ -466,21 +452,17 @@ export function registerTools(
     { readOnlyHint: true },
     withAuditLog("get_thread", logger, getUserId, async ({ threadId }) => {
       const userId = getUserId();
-      try {
-        const thread = await withGmailRetry(db, userId, (token) =>
-          gmail.getThread(token, threadId)
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(thread, null, 2),
-            },
-          ],
-        };
-      } catch (err) {
-        handleToolError(err);
-      }
+      const thread = await withGmailRetry(db, userId, (token) =>
+        gmail.getThread(token, threadId)
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(thread, null, 2),
+          },
+        ],
+      };
     })
   );
 
@@ -510,21 +492,17 @@ export function registerTools(
     { readOnlyHint: true },
     withAuditLog("get_history", logger, getUserId, async ({ startHistoryId, maxResults, pageToken }) => {
       const userId = getUserId();
-      try {
-        const history = await withGmailRetry(db, userId, (token) =>
-          gmail.getHistory(token, { startHistoryId, maxResults, pageToken })
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(history, null, 2),
-            },
-          ],
-        };
-      } catch (err) {
-        handleToolError(err);
-      }
+      const history = await withGmailRetry(db, userId, (token) =>
+        gmail.getHistory(token, { startHistoryId, maxResults, pageToken })
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(history, null, 2),
+          },
+        ],
+      };
     })
   );
 
@@ -537,21 +515,17 @@ export function registerTools(
     { readOnlyHint: true },
     withAuditLog("get_profile", logger, getUserId, async () => {
       const userId = getUserId();
-      try {
-        const profile = await withGmailRetry(db, userId, (token) =>
-          gmail.getProfile(token)
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(profile, null, 2),
-            },
-          ],
-        };
-      } catch (err) {
-        handleToolError(err);
-      }
+      const profile = await withGmailRetry(db, userId, (token) =>
+        gmail.getProfile(token)
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(profile, null, 2),
+          },
+        ],
+      };
     })
   );
 
@@ -584,33 +558,29 @@ export function registerTools(
         const userId = getUserId();
         const allLabelIds = [...(addLabelIds ?? []), ...(removeLabelIds ?? [])];
 
-        try {
-          const message = await withGmailRetry(db, userId, async (token) => {
-            await assertLabelsExist(token, allLabelIds);
-            return gmail.modifyMessageLabels(token, messageId, {
-              addLabelIds,
-              removeLabelIds,
-            });
+        const message = await withGmailRetry(db, userId, async (token) => {
+          await assertLabelsExist(token, allLabelIds);
+          return gmail.modifyMessageLabels(token, messageId, {
+            addLabelIds,
+            removeLabelIds,
           });
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(
-                  {
-                    success: true,
-                    message: `Labels updated on message ${messageId}`,
-                    updatedMessage: message,
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        } catch (err) {
-          handleToolError(err);
-        }
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: true,
+                  message: `Labels updated on message ${messageId}`,
+                  updatedMessage: message,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
       },
       (args) => ({
         messageIds: [args.messageId],
@@ -649,33 +619,29 @@ export function registerTools(
         const userId = getUserId();
         const allLabelIds = [...(addLabelIds ?? []), ...(removeLabelIds ?? [])];
 
-        try {
-          const thread = await withGmailRetry(db, userId, async (token) => {
-            await assertLabelsExist(token, allLabelIds);
-            return gmail.modifyThreadLabels(token, threadId, {
-              addLabelIds,
-              removeLabelIds,
-            });
+        const thread = await withGmailRetry(db, userId, async (token) => {
+          await assertLabelsExist(token, allLabelIds);
+          return gmail.modifyThreadLabels(token, threadId, {
+            addLabelIds,
+            removeLabelIds,
           });
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(
-                  {
-                    success: true,
-                    message: `Labels updated on thread ${threadId}`,
-                    updatedThread: thread,
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        } catch (err) {
-          handleToolError(err);
-        }
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: true,
+                  message: `Labels updated on thread ${threadId}`,
+                  updatedThread: thread,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
       },
       (args) => ({
         threadId: args.threadId,
@@ -718,34 +684,30 @@ export function registerTools(
         const userId = getUserId();
         const allLabelIds = [...(addLabelIds ?? []), ...(removeLabelIds ?? [])];
 
-        try {
-          await withGmailRetry(db, userId, async (token) => {
-            await assertLabelsExist(token, allLabelIds);
-            return gmail.batchModifyMessageLabels(token, {
-              ids,
-              addLabelIds,
-              removeLabelIds,
-            });
+        await withGmailRetry(db, userId, async (token) => {
+          await assertLabelsExist(token, allLabelIds);
+          return gmail.batchModifyMessageLabels(token, {
+            ids,
+            addLabelIds,
+            removeLabelIds,
           });
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(
-                  {
-                    success: true,
-                    message: `Labels updated on ${ids.length} message(s)`,
-                    affectedMessageCount: ids.length,
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        } catch (err) {
-          handleToolError(err);
-        }
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: true,
+                  message: `Labels updated on ${ids.length} message(s)`,
+                  affectedMessageCount: ids.length,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
       },
       (args) => ({
         messageIds: args.ids,
