@@ -33,7 +33,7 @@ const db = createTestDb();
 
 // Minimal Fastify app wired to the test DB (no CORS / rate-limiter overhead).
 const app = Fastify({ logger: false });
-const handleMcpRequest = createMcpRequestHandler(db);
+const handleMcpRequest = createMcpRequestHandler(db, app.log);
 app.post("/mcp", async (request, reply) => {
   await handleMcpRequest(request, reply);
 });

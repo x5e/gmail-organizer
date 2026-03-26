@@ -68,7 +68,7 @@ export async function buildApp() {
 
   // ─── Routes ─────────────────────────────────────────────────────────────────
 
-  const handleMcpRequest = createMcpRequestHandler(sql);
+  const handleMcpRequest = createMcpRequestHandler(sql, app.log);
 
   /** POST /mcp — Main MCP Streamable HTTP endpoint. */
   app.post("/mcp", async (request, reply) => {

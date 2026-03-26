@@ -15,6 +15,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { FastifyRequest, FastifyReply } from "fastify";
+import type { BaseLogger } from "pino";
 import type postgres from "postgres";
 import { registerTools } from "./tools/index.js";
 import { resolveToken } from "./db/users.js";
@@ -40,7 +41,7 @@ const SERVER_CAPABILITIES = {
  *
  * @param db - The postgres.js connection pool used for token lookups.
  */
-export function createMcpRequestHandler(db: postgres.Sql) {
+export function createMcpRequestHandler(db: postgres.Sql, logger: BaseLogger) {
   /**
    * Handles a single POST /mcp request.
    * Hashes the bearer token, resolves it to a user ID via the database,
@@ -86,7 +87,7 @@ export function createMcpRequestHandler(db: postgres.Sql) {
       capabilities: SERVER_CAPABILITIES,
     });
 
-    registerTools(server, db, () => userId);
+    registerTools(server, db, () => userId, logger);
 
     try {
       await server.connect(transport);
