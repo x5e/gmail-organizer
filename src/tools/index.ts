@@ -31,7 +31,9 @@
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import type { BaseLogger } from "pino";
 import type postgres from "postgres";
 import { getValidAccessToken, forceRefreshAccessToken } from "../oauth/tokens.js";
 import * as gmail from "../gmail/client.js";
@@ -81,6 +83,76 @@ function handleToolError(err: unknown): never {
     throw new Error(`Gmail API error: ${err.message}`);
   }
   throw err;
+}
+
+/**
+ * Wraps a tool handler with structured audit logging.
+ *
+ * Logs at `info` on success with user ID, tool name, duration, and (for write
+ * tools) affected resource IDs and label changes. Logs at `warn` for expected
+ * Gmail errors (4xx) and `error` for unexpected failures (5xx, non-Gmail).
+ * Always re-throws so that handleToolError still processes the error for the
+ * MCP response.
+ */
+export function withAuditLog<T>(
+  toolName: string,
+  logger: BaseLogger,
+  getUserId: () => string,
+  handler: (args: T) => Promise<CallToolResult>,
+  extractWriteDetails?: (args: T) => Record<string, unknown>
+): (args: T) => Promise<CallToolResult> {
+  return async (args: T) => {
+    const startTime = Date.now();
+    const userId = getUserId();
+    try {
+      const result = await handler(args);
+      const durationMs = Date.now() - startTime;
+
+      const logPayload: Record<string, unknown> = {
+        tool: toolName,
+        userId,
+        durationMs,
+        success: true,
+      };
+
+      if (extractWriteDetails) {
+        Object.assign(logPayload, extractWriteDetails(args));
+      }
+
+      logger.info(logPayload, "tool invocation");
+      return result;
+    } catch (err) {
+      const durationMs = Date.now() - startTime;
+
+      if (err instanceof GmailApiError) {
+        const level = err.status >= 500 ? "error" : "warn";
+        logger[level](
+          {
+            tool: toolName,
+            userId,
+            durationMs,
+            success: false,
+            errorStatus: err.status,
+            errorMessage: err.message,
+          },
+          "tool invocation failed"
+        );
+      } else {
+        logger.error(
+          {
+            tool: toolName,
+            userId,
+            durationMs,
+            success: false,
+            errorMessage: err instanceof Error ? err.message : String(err),
+          },
+          "tool invocation failed"
+        );
+      }
+
+      throw err;
+    }
+  };
 }
 
 /**
@@ -140,7 +212,8 @@ async function withGmailRetry<T>(
 export function registerTools(
   server: McpServer,
   db: postgres.Sql,
-  getUserId: () => string
+  getUserId: () => string,
+  logger: BaseLogger
 ): void {
   // ─── 1. list_labels ──────────────────────────────────────────────────────────
 
@@ -149,7 +222,7 @@ export function registerTools(
     "List all labels in the user's Gmail account, including system labels (INBOX, SENT, etc.) and user-created labels. Returns label IDs needed for other operations.",
     {},
     { readOnlyHint: true },
-    async () => {
+    withAuditLog("list_labels", logger, getUserId, async () => {
       const userId = getUserId();
       try {
         const labels = await withGmailRetry(db, userId, (token) =>
@@ -166,7 +239,7 @@ export function registerTools(
       } catch (err) {
         handleToolError(err);
       }
-    }
+    })
   );
 
   // ─── 2. search_messages ──────────────────────────────────────────────────────
@@ -189,7 +262,7 @@ export function registerTools(
         .describe("Page token from a previous response for pagination"),
     },
     { readOnlyHint: true },
-    async ({ q, maxResults, pageToken }) => {
+    withAuditLog("search_messages", logger, getUserId, async ({ q, maxResults, pageToken }) => {
       const userId = getUserId();
       try {
         const result = await withGmailRetry(db, userId, (token) =>
@@ -206,7 +279,7 @@ export function registerTools(
       } catch (err) {
         handleToolError(err);
       }
-    }
+    })
   );
 
   // ─── 3. list_threads ─────────────────────────────────────────────────────────
@@ -236,7 +309,7 @@ export function registerTools(
         .describe("Page token from a previous response for pagination"),
     },
     { readOnlyHint: true },
-    async ({ q, labelIds, maxResults, pageToken }) => {
+    withAuditLog("list_threads", logger, getUserId, async ({ q, labelIds, maxResults, pageToken }) => {
       const userId = getUserId();
       try {
         const result = await withGmailRetry(db, userId, (token) =>
@@ -253,7 +326,7 @@ export function registerTools(
       } catch (err) {
         handleToolError(err);
       }
-    }
+    })
   );
 
   // ─── 4. get_message ──────────────────────────────────────────────────────────
@@ -273,7 +346,7 @@ export function registerTools(
         ),
     },
     { readOnlyHint: true },
-    async ({ messageId, format }) => {
+    withAuditLog("get_message", logger, getUserId, async ({ messageId, format }) => {
       const userId = getUserId();
       try {
         const message = await withGmailRetry(db, userId, (token) =>
@@ -290,7 +363,7 @@ export function registerTools(
       } catch (err) {
         handleToolError(err);
       }
-    }
+    })
   );
 
   // ─── 5. get_attachment ───────────────────────────────────────────────────────
@@ -315,7 +388,7 @@ export function registerTools(
         ),
     },
     { readOnlyHint: true },
-    async ({ messageId, attachmentId, maxBytes }) => {
+    withAuditLog("get_attachment", logger, getUserId, async ({ messageId, attachmentId, maxBytes }) => {
       const userId = getUserId();
       try {
         const { attachment, message } = await withGmailRetry(
@@ -379,7 +452,7 @@ export function registerTools(
       } catch (err) {
         handleToolError(err);
       }
-    }
+    })
   );
 
   // ─── 6. get_thread ───────────────────────────────────────────────────────────
@@ -391,7 +464,7 @@ export function registerTools(
       threadId: z.string().describe("The Gmail thread ID"),
     },
     { readOnlyHint: true },
-    async ({ threadId }) => {
+    withAuditLog("get_thread", logger, getUserId, async ({ threadId }) => {
       const userId = getUserId();
       try {
         const thread = await withGmailRetry(db, userId, (token) =>
@@ -408,7 +481,7 @@ export function registerTools(
       } catch (err) {
         handleToolError(err);
       }
-    }
+    })
   );
 
   // ─── 7. get_history ──────────────────────────────────────────────────────────
@@ -435,7 +508,7 @@ export function registerTools(
         .describe("Page token from a previous response for pagination"),
     },
     { readOnlyHint: true },
-    async ({ startHistoryId, maxResults, pageToken }) => {
+    withAuditLog("get_history", logger, getUserId, async ({ startHistoryId, maxResults, pageToken }) => {
       const userId = getUserId();
       try {
         const history = await withGmailRetry(db, userId, (token) =>
@@ -452,7 +525,7 @@ export function registerTools(
       } catch (err) {
         handleToolError(err);
       }
-    }
+    })
   );
 
   // ─── 8. get_profile ──────────────────────────────────────────────────────────
@@ -462,7 +535,7 @@ export function registerTools(
     "Returns basic account information: email address, total message count, and current history ID. The historyId is a useful starting point for change tracking with get_history.",
     {},
     { readOnlyHint: true },
-    async () => {
+    withAuditLog("get_profile", logger, getUserId, async () => {
       const userId = getUserId();
       try {
         const profile = await withGmailRetry(db, userId, (token) =>
@@ -479,7 +552,7 @@ export function registerTools(
       } catch (err) {
         handleToolError(err);
       }
-    }
+    })
   );
 
   // ─── 9. modify_message_labels ────────────────────────────────────────────────
@@ -501,40 +574,50 @@ export function registerTools(
         .describe("Label IDs to remove from the message"),
     },
     { destructiveHint: false },
-    async ({ messageId, addLabelIds, removeLabelIds }) => {
-      assertNoBlockedLabels(addLabelIds, removeLabelIds);
+    withAuditLog(
+      "modify_message_labels",
+      logger,
+      getUserId,
+      async ({ messageId, addLabelIds, removeLabelIds }) => {
+        assertNoBlockedLabels(addLabelIds, removeLabelIds);
 
-      const userId = getUserId();
-      const allLabelIds = [...(addLabelIds ?? []), ...(removeLabelIds ?? [])];
+        const userId = getUserId();
+        const allLabelIds = [...(addLabelIds ?? []), ...(removeLabelIds ?? [])];
 
-      try {
-        const message = await withGmailRetry(db, userId, async (token) => {
-          await assertLabelsExist(token, allLabelIds);
-          return gmail.modifyMessageLabels(token, messageId, {
-            addLabelIds,
-            removeLabelIds,
+        try {
+          const message = await withGmailRetry(db, userId, async (token) => {
+            await assertLabelsExist(token, allLabelIds);
+            return gmail.modifyMessageLabels(token, messageId, {
+              addLabelIds,
+              removeLabelIds,
+            });
           });
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(
-                {
-                  success: true,
-                  message: `Labels updated on message ${messageId}`,
-                  updatedMessage: message,
-                },
-                null,
-                2
-              ),
-            },
-          ],
-        };
-      } catch (err) {
-        handleToolError(err);
-      }
-    }
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    success: true,
+                    message: `Labels updated on message ${messageId}`,
+                    updatedMessage: message,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        } catch (err) {
+          handleToolError(err);
+        }
+      },
+      (args) => ({
+        messageIds: [args.messageId],
+        addLabelIds: args.addLabelIds,
+        removeLabelIds: args.removeLabelIds,
+      })
+    )
   );
 
   // ─── 10. modify_thread_labels ────────────────────────────────────────────────
@@ -556,40 +639,50 @@ export function registerTools(
         .describe("Label IDs to remove from all messages in the thread"),
     },
     { destructiveHint: false },
-    async ({ threadId, addLabelIds, removeLabelIds }) => {
-      assertNoBlockedLabels(addLabelIds, removeLabelIds);
+    withAuditLog(
+      "modify_thread_labels",
+      logger,
+      getUserId,
+      async ({ threadId, addLabelIds, removeLabelIds }) => {
+        assertNoBlockedLabels(addLabelIds, removeLabelIds);
 
-      const userId = getUserId();
-      const allLabelIds = [...(addLabelIds ?? []), ...(removeLabelIds ?? [])];
+        const userId = getUserId();
+        const allLabelIds = [...(addLabelIds ?? []), ...(removeLabelIds ?? [])];
 
-      try {
-        const thread = await withGmailRetry(db, userId, async (token) => {
-          await assertLabelsExist(token, allLabelIds);
-          return gmail.modifyThreadLabels(token, threadId, {
-            addLabelIds,
-            removeLabelIds,
+        try {
+          const thread = await withGmailRetry(db, userId, async (token) => {
+            await assertLabelsExist(token, allLabelIds);
+            return gmail.modifyThreadLabels(token, threadId, {
+              addLabelIds,
+              removeLabelIds,
+            });
           });
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(
-                {
-                  success: true,
-                  message: `Labels updated on thread ${threadId}`,
-                  updatedThread: thread,
-                },
-                null,
-                2
-              ),
-            },
-          ],
-        };
-      } catch (err) {
-        handleToolError(err);
-      }
-    }
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    success: true,
+                    message: `Labels updated on thread ${threadId}`,
+                    updatedThread: thread,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        } catch (err) {
+          handleToolError(err);
+        }
+      },
+      (args) => ({
+        threadId: args.threadId,
+        addLabelIds: args.addLabelIds,
+        removeLabelIds: args.removeLabelIds,
+      })
+    )
   );
 
   // ─── 11. batch_modify_message_labels ─────────────────────────────────────────
@@ -615,40 +708,50 @@ export function registerTools(
         .describe("Label IDs to remove from all specified messages"),
     },
     { destructiveHint: false },
-    async ({ ids, addLabelIds, removeLabelIds }) => {
-      assertNoBlockedLabels(addLabelIds, removeLabelIds);
+    withAuditLog(
+      "batch_modify_message_labels",
+      logger,
+      getUserId,
+      async ({ ids, addLabelIds, removeLabelIds }) => {
+        assertNoBlockedLabels(addLabelIds, removeLabelIds);
 
-      const userId = getUserId();
-      const allLabelIds = [...(addLabelIds ?? []), ...(removeLabelIds ?? [])];
+        const userId = getUserId();
+        const allLabelIds = [...(addLabelIds ?? []), ...(removeLabelIds ?? [])];
 
-      try {
-        await withGmailRetry(db, userId, async (token) => {
-          await assertLabelsExist(token, allLabelIds);
-          return gmail.batchModifyMessageLabels(token, {
-            ids,
-            addLabelIds,
-            removeLabelIds,
+        try {
+          await withGmailRetry(db, userId, async (token) => {
+            await assertLabelsExist(token, allLabelIds);
+            return gmail.batchModifyMessageLabels(token, {
+              ids,
+              addLabelIds,
+              removeLabelIds,
+            });
           });
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(
-                {
-                  success: true,
-                  message: `Labels updated on ${ids.length} message(s)`,
-                  affectedMessageCount: ids.length,
-                },
-                null,
-                2
-              ),
-            },
-          ],
-        };
-      } catch (err) {
-        handleToolError(err);
-      }
-    }
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    success: true,
+                    message: `Labels updated on ${ids.length} message(s)`,
+                    affectedMessageCount: ids.length,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        } catch (err) {
+          handleToolError(err);
+        }
+      },
+      (args) => ({
+        messageIds: args.ids,
+        addLabelIds: args.addLabelIds,
+        removeLabelIds: args.removeLabelIds,
+      })
+    )
   );
 }
