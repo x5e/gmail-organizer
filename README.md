@@ -175,17 +175,26 @@ npm run migrate
 
 ## Running Tests
 
-Tests require Docker to be running (for the PostgreSQL test container). The `npm test` command starts the container automatically.
+Tests require Docker to be running (for the PostgreSQL test container).
 
 ```bash
-# Start the test database and run all tests (recommended)
+# Run tests locally (starts test postgres automatically)
 npm test
 
-# Run tests in watch mode (development)
+# Run the full test suite inside Docker (postgres + vitest in containers)
+make test
+
+# Run tests in watch mode (local development)
 npm run test:watch
 
 # Run tests with coverage report
 npm run test:coverage
+```
+
+You can also build the production Docker image with:
+
+```bash
+make            # builds the production image as gmail-organizer-mcp
 ```
 
 **What the tests cover:**
@@ -250,21 +259,7 @@ npm run build && npm start
 
 1. Install the [gcloud CLI](https://cloud.google.com/sdk/docs/install) and authenticate.
 2. Enable APIs: `gcloud services enable run.googleapis.com sqladmin.googleapis.com secretmanager.googleapis.com`
-3. Create a `Dockerfile` in the project root:
-
-   ```dockerfile
-   FROM node:20-alpine
-   WORKDIR /app
-   COPY package*.json ./
-   RUN npm ci --omit=dev
-   COPY . .
-   RUN npm run build
-   EXPOSE 8080
-   ENV PORT=8080
-   CMD ["npm", "start"]
-   ```
-
-4. Build and push the container:
+3. The repository includes a multi-stage `Dockerfile` at the project root. Build and push the container:
 
    ```bash
    gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/gmail-mcp-server
@@ -522,7 +517,11 @@ The two reviews are independent and can be pursued in parallel.
 │       └── db-helpers.ts          # Test database helpers
 ├── migrations/
 │   └── 001_initial.sql            # Database schema
+├── Dockerfile                     # Multi-stage: builder, production, test targets
+├── .dockerignore
 ├── docker-compose.yml             # PostgreSQL test container (port 5433)
+├── docker-compose.test.yml        # Containerized test suite (make test)
+├── Makefile                       # make = build image, make test = test in Docker
 ├── .env.example                   # Environment variable template
 ├── tsconfig.json
 ├── vitest.config.ts

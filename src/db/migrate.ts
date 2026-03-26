@@ -64,9 +64,10 @@ export async function runMigrations(sql: postgres.Sql): Promise<void> {
     // Run the migration and record it atomically.
     await sql.begin(async (tx) => {
       await tx.unsafe(sqlText);
-      await tx`
-        INSERT INTO schema_migrations (filename) VALUES (${filename})
-      `;
+      await tx.unsafe(
+        "INSERT INTO schema_migrations (filename) VALUES ($1)",
+        [filename]
+      );
     });
 
     console.log(`Applied migration: ${filename}`);

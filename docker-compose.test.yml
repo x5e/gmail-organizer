@@ -1,0 +1,26 @@
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: gmail_organizer_test
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d gmail_organizer_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  test-runner:
+    build:
+      context: .
+      target: test
+    environment:
+      GOOGLE_CLIENT_ID: test-client-id
+      GOOGLE_CLIENT_SECRET: test-client-secret
+      TOKEN_ENCRYPTION_KEY: RPo3D2ZLeaTM3gyoxkOdT0BE7vxKFTkJ6Im7MCGiSJA=
+      DATABASE_URL: postgres://test:test@postgres-test:5432/gmail_organizer_test
+      BASE_URL: http://localhost:3000
+    depends_on:
+      postgres-test:
+        condition: service_healthy

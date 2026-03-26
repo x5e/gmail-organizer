@@ -68,7 +68,7 @@ export async function buildApp() {
 
   // ─── Routes ─────────────────────────────────────────────────────────────────
 
-  const handleMcpRequest = createMcpRequestHandler(sql, app.log);
+  const handleMcpRequest = createMcpRequestHandler(sql, app.log as unknown as import("pino").BaseLogger);
 
   /** POST /mcp — Main MCP Streamable HTTP endpoint. */
   app.post("/mcp", async (request, reply) => {

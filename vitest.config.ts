@@ -23,7 +23,9 @@ export default defineConfig({
       GOOGLE_CLIENT_SECRET: "test-client-secret",
       // 32-byte key base64-encoded (dummy, for tests only — not a real secret)
       TOKEN_ENCRYPTION_KEY: "RPo3D2ZLeaTM3gyoxkOdT0BE7vxKFTkJ6Im7MCGiSJA=",
-      DATABASE_URL: "postgres://test:test@localhost:5433/gmail_organizer_test",
+      DATABASE_URL:
+        process.env.DATABASE_URL ||
+        "postgres://test:test@localhost:5433/gmail_organizer_test",
       BASE_URL: "http://localhost:3000",
     },
     coverage: {
