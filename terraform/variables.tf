@@ -9,8 +9,14 @@ variable "region" {
   default     = "us-east4"
 }
 
+variable "deploy_app" {
+  description = "Set to true to create the Cloud Run service. Leave false on first apply to provision infrastructure first (VPC, DB, secrets, registry, bastion), then push the Docker image and populate secrets before setting this to true."
+  type        = bool
+  default     = false
+}
+
 variable "domain" {
-  description = "Custom domain for Cloud Run (e.g. reversible.app). Set to empty string to skip domain mapping."
+  description = "Custom domain for Cloud Run (e.g. reversible.app). Required when deploy_app = true."
   type        = string
   default     = ""
 }
@@ -43,10 +49,4 @@ variable "cloudrun_max_instances" {
   description = "Maximum number of Cloud Run instances"
   type        = number
   default     = 10
-}
-
-variable "bastion_ssh_cidrs" {
-  description = "CIDR ranges allowed to SSH into the bastion (e.g. your IP). Use [\"0.0.0.0/0\"] to allow all."
-  type        = list(string)
-  default     = ["0.0.0.0/0"]
 }

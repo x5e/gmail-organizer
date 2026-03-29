@@ -1,4 +1,8 @@
 # Cloud Run service + dedicated service account
+#
+# Gated behind var.deploy_app (default: false).
+# On first apply, only infrastructure (VPC, DB, secrets, registry, bastion) is created.
+# After pushing the Docker image and populating secret versions, set deploy_app = true.
 
 resource "google_service_account" "cloudrun" {
   account_id   = "gmail-organizer-run"
@@ -6,9 +10,17 @@ resource "google_service_account" "cloudrun" {
 }
 
 resource "google_cloud_run_v2_service" "app" {
+  count    = var.deploy_app ? 1 : 0
   name     = "gmail-organizer"
   location = var.region
   ingress  = "INGRESS_TRAFFIC_ALL"
+
+  lifecycle {
+    precondition {
+      condition     = var.domain != ""
+      error_message = "var.domain is required when deploy_app = true (the app needs BASE_URL to start)."
+    }
+  }
 
   template {
     service_account = google_service_account.cloudrun.email
@@ -44,7 +56,7 @@ resource "google_cloud_run_v2_service" "app" {
 
       env {
         name  = "BASE_URL"
-        value = var.domain != "" ? "https://${var.domain}" : ""
+        value = "https://${var.domain}"
       }
 
       env {
@@ -103,15 +115,16 @@ resource "google_cloud_run_v2_service" "app" {
 
 # Allow unauthenticated access (the app handles its own auth via bearer tokens)
 resource "google_cloud_run_v2_service_iam_member" "public" {
-  name     = google_cloud_run_v2_service.app.name
+  count    = var.deploy_app ? 1 : 0
+  name     = google_cloud_run_v2_service.app[0].name
   location = var.region
   role     = "roles/run.invoker"
   member   = "allUsers"
 }
 
-# Domain mapping (optional — only created when domain is set)
+# Domain mapping (only created when deploying with a domain)
 resource "google_cloud_run_domain_mapping" "custom" {
-  count    = var.domain != "" ? 1 : 0
+  count    = var.deploy_app && var.domain != "" ? 1 : 0
   name     = var.domain
   location = var.region
 
@@ -120,6 +133,6 @@ resource "google_cloud_run_domain_mapping" "custom" {
   }
 
   spec {
-    route_name = google_cloud_run_v2_service.app.name
+    route_name = google_cloud_run_v2_service.app[0].name
   }
 }

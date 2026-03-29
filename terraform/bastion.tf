@@ -1,5 +1,10 @@
 # Bastion VM — small instance in the VPC for direct psql/pg_dump access to Cloud SQL
 
+# Auto-detect the public IP of whoever is running terraform
+data "http" "my_ip" {
+  url = "https://api.ipify.org"
+}
+
 resource "google_compute_instance" "bastion" {
   name         = "gmail-organizer-bastion"
   machine_type = "e2-micro"
@@ -35,7 +40,7 @@ resource "google_compute_instance" "bastion" {
   depends_on = [google_project_service.apis["compute.googleapis.com"]]
 }
 
-# Allow SSH to bastion only
+# Allow SSH to bastion only from the IP running terraform
 resource "google_compute_firewall" "bastion_ssh" {
   name    = "gmail-organizer-bastion-ssh"
   network = google_compute_network.main.name
@@ -45,6 +50,6 @@ resource "google_compute_firewall" "bastion_ssh" {
     ports    = ["22"]
   }
 
-  source_ranges = var.bastion_ssh_cidrs
+  source_ranges = ["${chomp(data.http.my_ip.response_body)}/32"]
   target_tags   = ["bastion"]
 }

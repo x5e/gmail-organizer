@@ -3,15 +3,17 @@
 
 project_id = "your-gcp-project-id"
 region     = "us-east4"
-domain     = "your-domain.com" # Set to "" to skip domain mapping
+
+# --- Phase 1: infrastructure only (first apply) ---
+deploy_app = false
+domain     = "" # Not needed yet
 
 # Database
 db_tier = "db-custom-1-3840"
 db_name = "gmail_organizer"
 db_user = "app"
 
-# Cloud Run image — update after first push to Artifact Registry
+# --- Phase 2: deploy the app (after pushing image + populating secrets) ---
+# deploy_app     = true
+# domain         = "your-domain.com"
 # cloudrun_image = "us-east4-docker.pkg.dev/your-project/gmail-organizer/server:latest"
-
-# Restrict SSH to your IP (recommended for production)
-# bastion_ssh_cidrs = ["1.2.3.4/32"]
