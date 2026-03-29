@@ -55,7 +55,6 @@ const defaults = {
   tcpSamples: 4,
   pingCount: 5,
   shortlistSize: 10,
-  connectTimeoutMs: 3000,
 };
 
 function parseArgs(argv) {
