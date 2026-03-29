@@ -206,7 +206,7 @@ function pingRegion(ip, count) {
       }
 
       const match = stdout.match(
-        /round-trip min\/avg\/max\/(?:stddev|mdev) = ([0-9.]+)\/([0-9.]+)\/([0-9.]+)\//
+        /(?:round-trip|rtt)\s+min\/avg\/max\/(?:stddev|mdev)\s*=\s*([0-9.]+)\/([0-9.]+)\/([0-9.]+)\//
       );
 
       if (!match) {
