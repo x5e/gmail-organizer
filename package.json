@@ -15,7 +15,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "migrate": "tsx src/db/migrate.ts",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "measure:gcp-latency": "node ./measure-gcp-region-latency.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.2",
