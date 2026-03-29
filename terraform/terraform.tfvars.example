@@ -1,0 +1,17 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is gitignored — never commit secrets.
+
+project_id = "your-gcp-project-id"
+region     = "us-east4"
+domain     = "your-domain.com" # Set to "" to skip domain mapping
+
+# Database
+db_tier = "db-custom-1-3840"
+db_name = "gmail_organizer"
+db_user = "app"
+
+# Cloud Run image — update after first push to Artifact Registry
+# cloudrun_image = "us-east4-docker.pkg.dev/your-project/gmail-organizer/server:latest"
+
+# Restrict SSH to your IP (recommended for production)
+# bastion_ssh_cidrs = ["1.2.3.4/32"]
