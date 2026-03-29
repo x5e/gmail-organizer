@@ -165,7 +165,7 @@ async function benchmarkRegion(region, options) {
   const tcpTimes = [];
 
   for (let index = 0; index < options.tcpSamples; index += 1) {
-    tcpTimes.push(await connectTime(host, options.connectTimeoutMs));
+    tcpTimes.push(await connectTime(ip, options.connectTimeoutMs));
   }
 
   return {
