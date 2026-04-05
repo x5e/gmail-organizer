@@ -110,11 +110,33 @@ describe("GET /.well-known/oauth-protected-resource", () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toContain("application/json");
     const body = JSON.parse(response.body);
-    expect(body.resource).toMatch(/\/mcp$/);
+    // resource is the server root, not the /mcp path (see RFC 9728 §4 path-scoping rules)
+    expect(body.resource).toMatch(/^https?:\/\//);
+    expect(body.resource).not.toMatch(/\/mcp$/);
     expect(body.authorization_servers).toBeInstanceOf(Array);
     expect(body.authorization_servers).toHaveLength(1);
     expect(body.scopes_supported).toEqual(["gmail:read", "gmail:modify"]);
     expect(body.bearer_methods_supported).toEqual(["header"]);
+  });
+});
+
+describe("CORS", () => {
+  it("exposes WWW-Authenticate header on cross-origin 401 responses", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        Origin: "https://claude.ai",
+      },
+      payload: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+    });
+    expect(response.statusCode).toBe(401);
+    // access-control-expose-headers must list WWW-Authenticate so that
+    // browser-based MCP clients can read it from a cross-origin response.
+    const exposed = response.headers["access-control-expose-headers"] ?? "";
+    expect(exposed.toLowerCase()).toContain("www-authenticate");
   });
 });
 
