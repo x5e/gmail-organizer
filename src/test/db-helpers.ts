@@ -32,7 +32,7 @@ export function createTestDb(): postgres.Sql {
  * Call this in beforeEach to ensure test isolation.
  */
 export async function truncateAllTables(db: postgres.Sql): Promise<void> {
-  await db`TRUNCATE TABLE token_revocations, bearer_tokens, oauth_state, oauth_tokens, users CASCADE`;
+  await db`TRUNCATE TABLE token_revocations, bearer_tokens, oauth_state, oauth_tokens, users, authorization_codes CASCADE`;
 }
 
 /**

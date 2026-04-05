@@ -18,17 +18,42 @@ export interface OAuthStateRow {
   state: string;
   codeVerifier: string;
   createdAt: Date;
+  /** MCP client's redirect_uri — present only in the MCP authorization flow. */
+  mcpRedirectUri?: string | null;
+  /** MCP client's PKCE code_challenge — present only in the MCP authorization flow. */
+  mcpCodeChallenge?: string | null;
+  /** MCP client's opaque state value — present only in the MCP authorization flow. */
+  mcpClientState?: string | null;
 }
 
 /**
  * Inserts a new OAuth state row at the beginning of an authorization flow.
+ *
+ * The optional MCP client fields are stored when the request comes from an
+ * MCP client (i.e., /oauth/authorize included redirect_uri + code_challenge).
+ * They are null in the legacy direct-browser flow.
  */
 export async function createOAuthState(
   db: postgres.Sql = defaultSql,
-  { state, codeVerifier }: { state: string; codeVerifier: string }
+  {
+    state,
+    codeVerifier,
+    mcpRedirectUri,
+    mcpCodeChallenge,
+    mcpClientState,
+  }: {
+    state: string;
+    codeVerifier: string;
+    mcpRedirectUri?: string;
+    mcpCodeChallenge?: string;
+    mcpClientState?: string;
+  }
 ): Promise<void> {
   await db`
-    INSERT INTO oauth_state (state, code_verifier) VALUES (${state}, ${codeVerifier})
+    INSERT INTO oauth_state
+      (state, code_verifier, mcp_redirect_uri, mcp_code_challenge, mcp_client_state)
+    VALUES
+      (${state}, ${codeVerifier}, ${mcpRedirectUri ?? null}, ${mcpCodeChallenge ?? null}, ${mcpClientState ?? null})
   `;
 }
 
@@ -49,10 +74,17 @@ export async function consumeOAuthState(
   `;
 
   const rows = await db<
-    { state: string; code_verifier: string; created_at: Date }[]
+    {
+      state: string;
+      code_verifier: string;
+      created_at: Date;
+      mcp_redirect_uri: string | null;
+      mcp_code_challenge: string | null;
+      mcp_client_state: string | null;
+    }[]
   >`
     DELETE FROM oauth_state WHERE state = ${state}
-    RETURNING state, code_verifier, created_at
+    RETURNING state, code_verifier, created_at, mcp_redirect_uri, mcp_code_challenge, mcp_client_state
   `;
 
   if (rows.length === 0) return null;
@@ -62,5 +94,8 @@ export async function consumeOAuthState(
     state: row.state,
     codeVerifier: row.code_verifier,
     createdAt: row.created_at,
+    mcpRedirectUri: row.mcp_redirect_uri,
+    mcpCodeChallenge: row.mcp_code_challenge,
+    mcpClientState: row.mcp_client_state,
   };
 }

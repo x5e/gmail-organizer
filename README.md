@@ -101,10 +101,13 @@ MCP Client (Claude, OpenClaw, etc.)
 ┌─────────────────────────────────────────────────────────┐
 │                  Fastify HTTP Server                     │
 │                                                         │
-│  POST /mcp              ─► MCP SDK (stateless mode)     │
-│  GET  /oauth/authorize  ─► PKCE authorization redirect  │
-│  GET  /oauth/callback   ─► token exchange + storage     │
-│  GET  /health           ─► load balancer health check   │
+│  POST /mcp                        ─► MCP SDK (stateless)│
+│  GET  /.well-known/oauth-protected-resource  ─► RFC 9728│
+│  GET  /.well-known/oauth-authorization-server ─► RFC 8414│
+│  GET  /oauth/authorize            ─► PKCE redirect      │
+│  GET  /oauth/callback             ─► issues server code │
+│  POST /oauth/token                ─► token exchange     │
+│  GET  /health                     ─► health check       │
 │                                                         │
 │  Per-request flow:                                      │
 │    1. Hash bearer token, resolve to user ID via DB      │
@@ -466,7 +469,7 @@ The two reviews are independent and can be pursued in parallel.
 
 **Token encryption:** OAuth refresh tokens are encrypted with AES-256-GCM before being written to PostgreSQL. Each encryption uses a freshly generated 12-byte nonce; the stored value is `nonce || ciphertext || auth_tag`. The database never sees plaintext token values. A database credential leak alone is insufficient to recover user tokens.
 
-**PKCE OAuth flow:** The code verifier is generated server-side, stored in the `oauth_state` table, and never transmitted to the client. Only the SHA-256 challenge is sent to Google. This prevents authorization code interception attacks.
+**PKCE OAuth flow:** Two independent PKCE layers are in use. The server generates its own code verifier for Google (stored in `oauth_state`, never transmitted to the client) to prevent Google authorization code interception. When an MCP client initiates the flow, the client also provides its own PKCE code challenge; the server stores it and verifies the matching code verifier at `POST /oauth/token`, preventing interception of the server-issued authorization code.
 
 **TRASH/SPAM blocking:** All write tools reject label IDs `TRASH` and `SPAM`, regardless of how the request is formed. This prevents prompt injection attacks where malicious email content might attempt to instruct Claude to move messages to the trash.
 
@@ -493,11 +496,12 @@ The two reviews are independent and can be pursued in parallel.
 │   │   ├── index.ts               # postgres.js connection pool
 │   │   ├── migrate.ts             # SQL migration runner
 │   │   ├── users.ts               # users + oauth_tokens + bearer_tokens DB operations
-│   │   └── oauth-state.ts         # oauth_state DB operations
+│   │   ├── oauth-state.ts         # oauth_state DB operations
+│   │   └── authorization-codes.ts # authorization_codes DB operations (MCP token flow)
 │   ├── gmail/
 │   │   └── client.ts              # Gmail REST API wrapper (all 11 endpoints)
 │   ├── oauth/
-│   │   ├── handlers.ts            # /oauth/authorize + /oauth/callback routes
+│   │   ├── handlers.ts            # /oauth/authorize, /oauth/callback, POST /oauth/token
 │   │   └── tokens.ts              # Token exchange, refresh, caching
 │   ├── tools/
 │   │   ├── index.ts               # All 11 MCP tools registered here
@@ -516,7 +520,8 @@ The two reviews are independent and can be pursued in parallel.
 │       ├── setup.ts               # Per-test setup (starts/resets MSW)
 │       └── db-helpers.ts          # Test database helpers
 ├── migrations/
-│   └── 001_initial.sql            # Database schema
+│   ├── 001_initial.sql            # Initial database schema
+│   └── 002_authorization_codes.sql # authorization_codes table + oauth_state MCP columns
 ├── Dockerfile                     # Multi-stage: builder, production, test targets
 ├── .dockerignore
 ├── docker-compose.yml             # PostgreSQL test container (port 5433)
