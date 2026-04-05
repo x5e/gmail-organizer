@@ -138,6 +138,21 @@ describe("CORS", () => {
     const exposed = response.headers["access-control-expose-headers"] ?? "";
     expect(exposed.toLowerCase()).toContain("www-authenticate");
   });
+
+  it("allows DELETE in CORS preflight so browser clients can terminate MCP sessions", async () => {
+    const response = await app.inject({
+      method: "OPTIONS",
+      url: "/mcp",
+      headers: {
+        Origin: "https://claude.ai",
+        "Access-Control-Request-Method": "DELETE",
+      },
+    });
+    // Preflight must succeed (200 or 204) and include DELETE in the allowed methods.
+    expect(response.statusCode).toBeLessThan(300);
+    const allowed = (response.headers["access-control-allow-methods"] ?? "") as string;
+    expect(allowed.toUpperCase()).toContain("DELETE");
+  });
 });
 
 describe("GET /mcp — authenticated", () => {
