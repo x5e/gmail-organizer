@@ -141,6 +141,15 @@ describe("GET /oauth/authorize", () => {
     expect(response.statusCode).toBe(400);
     expect(JSON.parse(response.body).error).toBe("invalid_request");
   });
+
+  it("returns 400 when redirect_uri is present but code_challenge is missing", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/oauth/authorize?redirect_uri=https://mcp-client.example.com/callback",
+    });
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).error).toBe("invalid_request");
+  });
 });
 
 describe("GET /oauth/callback", () => {
@@ -347,6 +356,7 @@ describe("MCP OAuth flow (PKCE token endpoint)", () => {
     expect(tokenRes.statusCode).toBe(200);
     const tokenBody = JSON.parse(tokenRes.body);
     expect(typeof tokenBody.access_token).toBe("string");
+    expect(typeof tokenBody.refresh_token).toBe("string");
     expect(tokenBody.token_type).toBe("Bearer");
     expect(tokenBody.expires_in).toBe(3600);
 
@@ -501,6 +511,76 @@ describe("MCP OAuth flow (PKCE token endpoint)", () => {
     });
     expect(res2.statusCode).toBe(400);
     expect(JSON.parse(res2.body).error).toBe("invalid_grant");
+  });
+
+  it("POST /oauth/token with grant_type=refresh_token issues a new bearer token", async () => {
+    const { verifier, challenge } = generatePkce();
+    const { serverCode } = await doAuthorizeAndCallback(challenge);
+
+    // Get an initial access + refresh token
+    const tokenRes = await app.inject({
+      method: "POST",
+      url: "/oauth/token",
+      headers: { "content-type": "application/json" },
+      payload: {
+        grant_type: "authorization_code",
+        code: serverCode,
+        redirect_uri: MCP_REDIRECT_URI,
+        code_verifier: verifier,
+      },
+    });
+    const { refresh_token } = JSON.parse(tokenRes.body);
+
+    // Refresh to get a new token
+    const refreshRes = await app.inject({
+      method: "POST",
+      url: "/oauth/token",
+      headers: { "content-type": "application/json" },
+      payload: { grant_type: "refresh_token", refresh_token },
+    });
+    expect(refreshRes.statusCode).toBe(200);
+    const refreshBody = JSON.parse(refreshRes.body);
+    expect(typeof refreshBody.access_token).toBe("string");
+    expect(typeof refreshBody.refresh_token).toBe("string");
+    expect(refreshBody.token_type).toBe("Bearer");
+    expect(refreshBody.expires_in).toBe(3600);
+    // New token is different from the original
+    expect(refreshBody.access_token).not.toBe(refresh_token);
+
+    // New token authenticates against /mcp
+    const mcpRes = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        authorization: `Bearer ${refreshBody.access_token}`,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      payload: { jsonrpc: "2.0", method: "tools/list", id: 1 },
+    });
+    expect(mcpRes.statusCode).not.toBe(401);
+  });
+
+  it("POST /oauth/token returns 400 for invalid refresh_token", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/oauth/token",
+      headers: { "content-type": "application/json" },
+      payload: { grant_type: "refresh_token", refresh_token: "not-a-valid-token" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toBe("invalid_grant");
+  });
+
+  it("POST /oauth/token returns 400 when refresh_token param is missing", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/oauth/token",
+      headers: { "content-type": "application/json" },
+      payload: { grant_type: "refresh_token" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toBe("invalid_request");
   });
 
   it("legacy flow: callback without MCP params still returns JSON bearer token", async () => {

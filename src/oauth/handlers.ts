@@ -32,7 +32,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { config } from "../config.js";
 import { createOAuthState, consumeOAuthState } from "../db/oauth-state.js";
 import { createAuthorizationCode, consumeAuthorizationCode } from "../db/authorization-codes.js";
-import { exchangeCodeForTokens } from "./tokens.js";
+import { exchangeCodeForTokens, refreshBearerToken } from "./tokens.js";
 import { sql } from "../db/index.js";
 
 /** Google's OAuth 2.0 authorization endpoint. */
@@ -103,6 +103,17 @@ export async function registerOAuthRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({
         error: "invalid_request",
         message: "Only code_challenge_method=S256 is supported.",
+      });
+    }
+
+    // When the MCP flow is active (redirect_uri present), code_challenge is
+    // required. Without it, the callback would later attempt to insert NULL
+    // into the NOT NULL authorization_codes.code_challenge column, turning
+    // bad client input into a 500 after the user has already completed Google auth.
+    if (mcpRedirectUri && !mcpCodeChallenge) {
+      return reply.status(400).send({
+        error: "invalid_request",
+        message: "code_challenge is required when redirect_uri is provided.",
       });
     }
 
@@ -264,6 +275,7 @@ export async function registerOAuthRoutes(app: FastifyInstance): Promise<void> {
       redirect_uri?: string;
       code_verifier?: string;
       client_id?: string;
+      refresh_token?: string;
     };
   }>("/oauth/token", async (request: FastifyRequest<{
     Body: {
@@ -272,17 +284,46 @@ export async function registerOAuthRoutes(app: FastifyInstance): Promise<void> {
       redirect_uri?: string;
       code_verifier?: string;
       client_id?: string;
+      refresh_token?: string;
     };
   }>, reply: FastifyReply) => {
-    const { grant_type, code, redirect_uri, code_verifier } = request.body ?? {};
+    const { grant_type, code, redirect_uri, code_verifier, refresh_token } = request.body ?? {};
 
-    if (grant_type !== "authorization_code") {
+    if (grant_type !== "authorization_code" && grant_type !== "refresh_token") {
       return reply.status(400).send({
         error: "unsupported_grant_type",
-        message: "Only grant_type=authorization_code is supported.",
+        message: "Supported grant types: authorization_code, refresh_token.",
       });
     }
 
+    // ── refresh_token grant ──────────────────────────────────────────────────
+    if (grant_type === "refresh_token") {
+      if (!refresh_token) {
+        return reply.status(400).send({
+          error: "invalid_request",
+          message: "Missing required parameter: refresh_token.",
+        });
+      }
+
+      const result = await refreshBearerToken(sql, refresh_token);
+      if (!result) {
+        return reply.status(400).send({
+          error: "invalid_grant",
+          message: "Refresh token is invalid or revoked.",
+        });
+      }
+
+      app.log.info("OAuth token endpoint: bearer token refreshed");
+
+      return reply.send({
+        access_token: result.bearerToken,
+        refresh_token: result.bearerToken,
+        token_type: "Bearer",
+        expires_in: 3600,
+      });
+    }
+
+    // ── authorization_code grant ─────────────────────────────────────────────
     if (!code || !redirect_uri || !code_verifier) {
       return reply.status(400).send({
         error: "invalid_request",
@@ -328,6 +369,7 @@ export async function registerOAuthRoutes(app: FastifyInstance): Promise<void> {
 
       return reply.send({
         access_token: bearerToken,
+        refresh_token: bearerToken,
         token_type: "Bearer",
         expires_in: 3600,
       });

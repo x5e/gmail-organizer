@@ -22,6 +22,7 @@ import { encrypt, decrypt } from "../crypto.js";
 import {
   findOrCreateUserByEmail,
   insertBearerToken,
+  resolveToken,
   upsertOAuthTokens,
   updateAccessToken,
   getOAuthTokens,
@@ -262,6 +263,28 @@ async function doRefresh(
   }
 
   return newTokens.access_token;
+}
+
+/**
+ * Mints a new bearer token for the user identified by the given refresh token.
+ *
+ * The refresh token is the bearer token previously returned by the token
+ * endpoint. This validates that it is still active (not revoked), then mints
+ * and stores a new bearer token. The old token remains valid and is not
+ * automatically revoked.
+ *
+ * Returns null if the refresh token is invalid or revoked.
+ */
+export async function refreshBearerToken(
+  db: postgres.Sql,
+  refreshToken: string
+): Promise<{ bearerToken: string } | null> {
+  const userId = await resolveToken(db, hashToken(refreshToken));
+  if (!userId) return null;
+
+  const newBearerToken = randomBytes(32).toString("base64url");
+  await insertBearerToken(db, { tokenHash: hashToken(newBearerToken), userId });
+  return { bearerToken: newBearerToken };
 }
 
 /**
