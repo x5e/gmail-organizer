@@ -138,6 +138,61 @@ describe("CORS", () => {
     const exposed = response.headers["access-control-expose-headers"] ?? "";
     expect(exposed.toLowerCase()).toContain("www-authenticate");
   });
+
+  it("allows DELETE in CORS preflight so browser clients can terminate MCP sessions", async () => {
+    const response = await app.inject({
+      method: "OPTIONS",
+      url: "/mcp",
+      headers: {
+        Origin: "https://claude.ai",
+        "Access-Control-Request-Method": "DELETE",
+      },
+    });
+    // Preflight must succeed (200 or 204) and include DELETE in the allowed methods.
+    expect(response.statusCode).toBeLessThan(300);
+    const allowed = (response.headers["access-control-allow-methods"] ?? "") as string;
+    expect(allowed.toUpperCase()).toContain("DELETE");
+  });
+});
+
+describe("GET /mcp — authenticated", () => {
+  /**
+   * SSE streams never close in app.inject() (no events arrive, stream stays open).
+   * Instead we send a GET without the required Accept: text/event-stream header so
+   * the transport returns 406 immediately.  This proves three things without hanging:
+   *   1. Auth passed (would be 401 otherwise)
+   *   2. The route exists and is wired (would be 404 otherwise)
+   *   3. The request reached the MCP transport (which enforces the Accept requirement)
+   */
+  it("auth passes and request reaches MCP transport (transport returns 406 for missing SSE Accept)", async () => {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const response = await app.inject({
+      method: "GET",
+      url: "/mcp",
+      // Deliberately omit Accept: text/event-stream — transport rejects with 406
+      headers: { Authorization: `Bearer ${bearerToken}` },
+    });
+    expect(response.statusCode).not.toBe(401); // auth passed
+    expect(response.statusCode).not.toBe(404); // route exists
+    expect(response.statusCode).toBe(406);     // transport enforces SSE Accept requirement
+  });
+});
+
+describe("DELETE /mcp — authenticated", () => {
+  it("returns 200 (not 401 or 404) with a valid token", async () => {
+    const { bearerToken } = await createTestUserWithTokens(db);
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/mcp",
+      headers: {
+        Authorization: `Bearer ${bearerToken}`,
+      },
+    });
+    // Stateless mode: no session to delete, but auth passed → 200
+    expect(response.statusCode).not.toBe(401);
+    expect(response.statusCode).not.toBe(404);
+    expect(response.statusCode).toBe(200);
+  });
 });
 
 describe("GET /mcp authorization", () => {

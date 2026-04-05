@@ -49,7 +49,7 @@ export async function buildApp() {
     // Set ALLOWED_ORIGIN to restrict which domains can make requests.
     // Defaults to allowing all origins; set to your MCP client's domain in production.
     origin: process.env["ALLOWED_ORIGIN"] ?? true,
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
     // Expose WWW-Authenticate so browser-based MCP clients can read the header
     // from a cross-origin 401 response and follow the OAuth discovery chain.
     exposedHeaders: ["WWW-Authenticate"],
@@ -105,6 +105,7 @@ export async function buildApp() {
     issuer: config.baseUrl,
     authorization_endpoint: `${config.baseUrl}/oauth/authorize`,
     token_endpoint: `${config.baseUrl}/oauth/token`,
+    registration_endpoint: `${config.baseUrl}/oauth/register`,
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
