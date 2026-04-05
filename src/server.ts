@@ -85,6 +85,23 @@ export async function buildApp() {
   }));
 
   /**
+   * GET /.well-known/oauth-authorization-server — RFC 8414 Authorization Server Metadata.
+   *
+   * Tells MCP clients where to find the authorization, token, and other OAuth
+   * endpoints for this server. Clients discover this URL via the `authorization_servers`
+   * array in the protected resource metadata (Issue 1 / RFC 9728).
+   */
+  app.get("/.well-known/oauth-authorization-server", async () => ({
+    issuer: config.baseUrl,
+    authorization_endpoint: `${config.baseUrl}/oauth/authorize`,
+    token_endpoint: `${config.baseUrl}/oauth/token`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    code_challenge_methods_supported: ["S256"],
+    scopes_supported: ["gmail:read", "gmail:modify"],
+  }));
+
+  /**
    * GET /.well-known/oauth-protected-resource — RFC 9728 Protected Resource Metadata.
    *
    * The canonical resource is the server root (config.baseUrl), NOT /mcp.
