@@ -17,9 +17,13 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { FastifyRequest, FastifyReply } from "fastify";
 import type { BaseLogger } from "pino";
 import type postgres from "postgres";
+import { config } from "./config.js";
 import { registerTools } from "./tools/index.js";
 import { resolveToken } from "./db/users.js";
 import { hashToken } from "./oauth/tokens.js";
+
+/** RFC 9728 Protected Resource Metadata URL, included in WWW-Authenticate on 401s. */
+const RESOURCE_METADATA_URL = `${config.baseUrl}/.well-known/oauth-protected-resource`;
 
 /** Package metadata surfaced in the MCP server info. */
 const SERVER_INFO = {
@@ -58,24 +62,30 @@ export function createMcpRequestHandler(db: postgres.Sql, logger: BaseLogger) {
       : null;
 
     if (!rawToken) {
-      return reply.status(401).send({
-        error: "unauthorized",
-        message:
-          "Missing or invalid Authorization header. " +
-          "Include your bearer token: Authorization: Bearer <token>",
-      });
+      return reply
+        .status(401)
+        .header("WWW-Authenticate", `Bearer resource_metadata="${RESOURCE_METADATA_URL}"`)
+        .send({
+          error: "unauthorized",
+          message:
+            "Missing or invalid Authorization header. " +
+            "Include your bearer token: Authorization: Bearer <token>",
+        });
     }
 
     const tokenHash = hashToken(rawToken);
     const userId = await resolveToken(db, tokenHash);
 
     if (!userId) {
-      return reply.status(401).send({
-        error: "unauthorized",
-        message:
-          "Bearer token is invalid or has been revoked. " +
-          "Please re-authenticate via /oauth/authorize.",
-      });
+      return reply
+        .status(401)
+        .header("WWW-Authenticate", `Bearer resource_metadata="${RESOURCE_METADATA_URL}"`)
+        .send({
+          error: "unauthorized",
+          message:
+            "Bearer token is invalid or has been revoked. " +
+            "Please re-authenticate via /oauth/authorize.",
+        });
     }
 
     // Create a stateless transport + server pair for this request.

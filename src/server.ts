@@ -81,6 +81,14 @@ export async function buildApp() {
     timestamp: new Date().toISOString(),
   }));
 
+  /** GET /.well-known/oauth-protected-resource — RFC 9728 Protected Resource Metadata. */
+  app.get("/.well-known/oauth-protected-resource", async () => ({
+    resource: `${config.baseUrl}/mcp`,
+    authorization_servers: [config.baseUrl],
+    scopes_supported: ["gmail:read", "gmail:modify"],
+    bearer_methods_supported: ["header"],
+  }));
+
   await registerOAuthRoutes(app);
 
   return app;
