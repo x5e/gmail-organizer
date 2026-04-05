@@ -75,11 +75,157 @@ describe("GET /.well-known/oauth-authorization-server", () => {
     expect(typeof body.issuer).toBe("string");
     expect(body.authorization_endpoint).toContain("/oauth/authorize");
     expect(body.token_endpoint).toContain("/oauth/token");
+    expect(body.registration_endpoint).toContain("/oauth/register");
     expect(body.response_types_supported).toContain("code");
     expect(body.grant_types_supported).toContain("authorization_code");
     expect(body.code_challenge_methods_supported).toContain("S256");
     expect(body.scopes_supported).toContain("gmail:read");
     expect(body.scopes_supported).toContain("gmail:modify");
+  });
+});
+
+describe("POST /oauth/register", () => {
+  it("returns 201 with a valid client_id (RFC 7591 dynamic client registration)", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/oauth/register",
+      headers: { "Content-Type": "application/json" },
+      payload: {
+        client_name: "Claude Cowork",
+        redirect_uris: ["https://claude.ai/oauth/callback"],
+        grant_types: ["authorization_code"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none",
+      },
+    });
+    expect(response.statusCode).toBe(201);
+    const body = JSON.parse(response.body);
+    expect(typeof body.client_id).toBe("string");
+    expect(body.client_id.length).toBeGreaterThan(0);
+    expect(typeof body.client_id_issued_at).toBe("number");
+  });
+
+  it("returns a different client_id on each call", async () => {
+    const r1 = await app.inject({ method: "POST", url: "/oauth/register", payload: {} });
+    const r2 = await app.inject({ method: "POST", url: "/oauth/register", payload: {} });
+    expect(JSON.parse(r1.body).client_id).not.toBe(JSON.parse(r2.body).client_id);
+  });
+});
+
+describe("OAuth discovery chain (what a new MCP client like Cowork does)", () => {
+  /**
+   * Simulates the exact sequence an MCP client follows when first connecting:
+   *   1. Hit the MCP endpoint → 401 with WWW-Authenticate
+   *   2. Follow WWW-Authenticate → resource metadata (RFC 9728)
+   *   3. Follow authorization_servers → auth server metadata (RFC 8414)
+   *   4. Find registration_endpoint → dynamic client registration (RFC 7591)
+   *
+   * If any link in this chain breaks, clients cannot connect.
+   */
+  it("discovery chain: 401 → resource metadata → auth server metadata → registration endpoint", async () => {
+    // Step 1: hit GET /mcp without a token, expect 401 with a resource_metadata hint
+    const mcpRes = await app.inject({ method: "GET", url: "/mcp", headers: { Accept: "text/event-stream" } });
+    expect(mcpRes.statusCode).toBe(401);
+    const wwwAuth = mcpRes.headers["www-authenticate"] as string;
+    expect(wwwAuth).toBeDefined();
+
+    // Extract the resource_metadata URL from the WWW-Authenticate header
+    const metadataMatch = wwwAuth.match(/resource_metadata="([^"]+)"/);
+    expect(metadataMatch).not.toBeNull();
+    const resourceMetadataPath = new URL(metadataMatch![1]!).pathname;
+
+    // Step 2: fetch the resource metadata
+    const rmRes = await app.inject({ method: "GET", url: resourceMetadataPath });
+    expect(rmRes.statusCode).toBe(200);
+    const rm = JSON.parse(rmRes.body);
+    expect(Array.isArray(rm.authorization_servers)).toBe(true);
+    expect(rm.authorization_servers.length).toBeGreaterThan(0);
+
+    // Step 3: fetch the authorization server metadata from the advertised server
+    const asRes = await app.inject({ method: "GET", url: "/.well-known/oauth-authorization-server" });
+    expect(asRes.statusCode).toBe(200);
+    const as = JSON.parse(asRes.body);
+    expect(as.registration_endpoint).toBeDefined();
+
+    // Step 4: verify the registration_endpoint is reachable and works
+    const regPath = new URL(as.registration_endpoint).pathname;
+    const regRes = await app.inject({
+      method: "POST",
+      url: regPath,
+      headers: { "Content-Type": "application/json" },
+      payload: { client_name: "Test MCP Client", redirect_uris: ["https://client.example.com/cb"] },
+    });
+    expect(regRes.statusCode).toBe(201);
+    expect(typeof JSON.parse(regRes.body).client_id).toBe("string");
+  });
+
+  it("full Cowork-style flow: register → authorize → callback → token → GET /mcp succeeds", async () => {
+    const { verifier, challenge } = generatePkce();
+    const redirectUri = "https://mcp-client.example.com/callback";
+
+    // Register as a new client (what Cowork does when it has no client_id yet)
+    const regRes = await app.inject({
+      method: "POST",
+      url: "/oauth/register",
+      headers: { "Content-Type": "application/json" },
+      payload: {
+        client_name: "Claude Cowork",
+        redirect_uris: [redirectUri],
+        grant_types: ["authorization_code"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none",
+      },
+    });
+    expect(regRes.statusCode).toBe(201);
+    const { client_id } = JSON.parse(regRes.body);
+
+    // Authorize using the registered client_id
+    const authRes = await app.inject({
+      method: "GET",
+      url: `/oauth/authorize?client_id=${encodeURIComponent(client_id)}&redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge=${challenge}&code_challenge_method=S256&state=mystate`,
+    });
+    expect(authRes.statusCode).toBe(302);
+    const csrfState = new URL(authRes.headers["location"] as string).searchParams.get("state")!;
+
+    // Callback (Google returns control to our server)
+    const cbRes = await app.inject({
+      method: "GET",
+      url: `/oauth/callback?code=valid_auth_code&state=${csrfState}`,
+    });
+    expect(cbRes.statusCode).toBe(302);
+    const serverCode = new URL(cbRes.headers["location"] as string).searchParams.get("code")!;
+    expect(serverCode).toBeTruthy();
+
+    // Exchange the server code for a bearer token
+    const tokenRes = await app.inject({
+      method: "POST",
+      url: "/oauth/token",
+      headers: { "content-type": "application/json" },
+      payload: {
+        grant_type: "authorization_code",
+        code: serverCode,
+        redirect_uri: redirectUri,
+        code_verifier: verifier,
+        client_id,
+      },
+    });
+    expect(tokenRes.statusCode).toBe(200);
+    const { access_token } = JSON.parse(tokenRes.body);
+    expect(typeof access_token).toBe("string");
+
+    // Use the token on POST /mcp — must authenticate successfully (not 401)
+    const mcpRes = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        Authorization: `Bearer ${access_token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+      },
+      payload: { jsonrpc: "2.0", method: "tools/list", id: 1 },
+    });
+    expect(mcpRes.statusCode).not.toBe(401);
+    expect(mcpRes.statusCode).not.toBe(404);
   });
 });
 

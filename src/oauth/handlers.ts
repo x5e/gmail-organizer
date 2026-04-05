@@ -28,7 +28,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import { createOAuthState, consumeOAuthState } from "../db/oauth-state.js";
 import { createAuthorizationCode, consumeAuthorizationCode } from "../db/authorization-codes.js";
@@ -251,6 +251,26 @@ export async function registerOAuthRoutes(app: FastifyInstance): Promise<void> {
       }
     }
   );
+
+  /**
+   * POST /oauth/register
+   *
+   * RFC 7591 Dynamic Client Registration endpoint.
+   *
+   * MCP clients (e.g. Claude Cowork) that lack a pre-registered client_id call
+   * this endpoint before starting the authorization flow. We accept any valid
+   * registration request and return a freshly generated client_id.
+   *
+   * The client_id is not stored or validated in subsequent requests — the
+   * authorize and token endpoints already accept client_id without checking it —
+   * so this endpoint only needs to satisfy the SDK's schema requirements.
+   */
+  app.post("/oauth/register", async (_request, reply) => {
+    return reply.status(201).send({
+      client_id: randomUUID(),
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+    });
+  });
 
   /**
    * POST /oauth/token
