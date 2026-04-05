@@ -117,6 +117,19 @@ describe("POST /oauth/register", () => {
     const r2 = await app.inject({ method: "POST", url: "/oauth/register", payload });
     expect(JSON.parse(r1.body).client_id).not.toBe(JSON.parse(r2.body).client_id);
   });
+
+  it("ignores client_id in request body — server always generates a fresh one", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/oauth/register",
+      headers: { "Content-Type": "application/json" },
+      payload: { redirect_uris: ["https://example.com/cb"], client_id: "attacker-chosen-id" },
+    });
+    expect(response.statusCode).toBe(201);
+    const body = JSON.parse(response.body);
+    expect(body.client_id).not.toBe("attacker-chosen-id");
+    expect(typeof body.client_id).toBe("string");
+  });
 });
 
 describe("OAuth discovery chain (what a new MCP client like Cowork does)", () => {
@@ -510,6 +523,38 @@ describe("MCP OAuth flow (PKCE token endpoint)", () => {
 
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
+    expect(typeof body.access_token).toBe("string");
+    expect(body.token_type).toBe("Bearer");
+  });
+
+  it("POST /oauth/token with grant_type=refresh_token also accepts application/x-www-form-urlencoded", async () => {
+    const { verifier, challenge } = generatePkce();
+    const { serverCode } = await doAuthorizeAndCallback(challenge);
+
+    // Exchange the server code for tokens using JSON (to get a refresh token)
+    const tokenRes = await app.inject({
+      method: "POST",
+      url: "/oauth/token",
+      headers: { "content-type": "application/json" },
+      payload: {
+        grant_type: "authorization_code",
+        code: serverCode,
+        redirect_uri: MCP_REDIRECT_URI,
+        code_verifier: verifier,
+      },
+    });
+    const { refresh_token } = JSON.parse(tokenRes.body);
+
+    // Now refresh using form-encoded body (as the MCP SDK does for all token endpoint calls)
+    const params = new URLSearchParams({ grant_type: "refresh_token", refresh_token });
+    const refreshRes = await app.inject({
+      method: "POST",
+      url: "/oauth/token",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: params.toString(),
+    });
+    expect(refreshRes.statusCode).toBe(200);
+    const body = JSON.parse(refreshRes.body);
     expect(typeof body.access_token).toBe("string");
     expect(body.token_type).toBe("Bearer");
   });
