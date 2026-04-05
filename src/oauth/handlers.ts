@@ -265,8 +265,14 @@ export async function registerOAuthRoutes(app: FastifyInstance): Promise<void> {
    * authorize and token endpoints already accept client_id without checking it —
    * so this endpoint only needs to satisfy the SDK's schema requirements.
    */
-  app.post("/oauth/register", async (_request, reply) => {
+  app.post("/oauth/register", async (request, reply) => {
+    // Echo back whatever metadata the client sent — RFC 7591 requires the response to
+    // include all registered metadata fields (e.g. redirect_uris) alongside the
+    // generated client_id.  The MCP SDK parses the response with a schema that
+    // requires redirect_uris, so omitting it causes a parse error on the client side.
+    const body = (request.body ?? {}) as Record<string, unknown>;
     return reply.status(201).send({
+      ...body,
       client_id: randomUUID(),
       client_id_issued_at: Math.floor(Date.now() / 1000),
     });

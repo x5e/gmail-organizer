@@ -85,14 +85,15 @@ describe("GET /.well-known/oauth-authorization-server", () => {
 });
 
 describe("POST /oauth/register", () => {
-  it("returns 201 with a valid client_id (RFC 7591 dynamic client registration)", async () => {
+  it("returns 201 with a valid client_id and echoes back client metadata", async () => {
+    const redirectUris = ["https://claude.ai/oauth/callback"];
     const response = await app.inject({
       method: "POST",
       url: "/oauth/register",
       headers: { "Content-Type": "application/json" },
       payload: {
         client_name: "Claude Cowork",
-        redirect_uris: ["https://claude.ai/oauth/callback"],
+        redirect_uris: redirectUris,
         grant_types: ["authorization_code"],
         response_types: ["code"],
         token_endpoint_auth_method: "none",
@@ -103,11 +104,17 @@ describe("POST /oauth/register", () => {
     expect(typeof body.client_id).toBe("string");
     expect(body.client_id.length).toBeGreaterThan(0);
     expect(typeof body.client_id_issued_at).toBe("number");
+    // redirect_uris must be echoed back — the MCP SDK's OAuthClientInformationFullSchema
+    // merges OAuthClientMetadataSchema (which requires redirect_uris) and will throw a
+    // Zod parse error if redirect_uris is absent, silently aborting the auth flow.
+    expect(body.redirect_uris).toEqual(redirectUris);
+    expect(body.client_name).toBe("Claude Cowork");
   });
 
   it("returns a different client_id on each call", async () => {
-    const r1 = await app.inject({ method: "POST", url: "/oauth/register", payload: {} });
-    const r2 = await app.inject({ method: "POST", url: "/oauth/register", payload: {} });
+    const payload = { redirect_uris: ["https://example.com/cb"] };
+    const r1 = await app.inject({ method: "POST", url: "/oauth/register", payload });
+    const r2 = await app.inject({ method: "POST", url: "/oauth/register", payload });
     expect(JSON.parse(r1.body).client_id).not.toBe(JSON.parse(r2.body).client_id);
   });
 });
@@ -480,6 +487,31 @@ describe("MCP OAuth flow (PKCE token endpoint)", () => {
 
     expect(serverCode).toBeTruthy();
     expect(returnedState).toBe(MCP_CLIENT_STATE);
+  });
+
+  it("POST /oauth/token accepts application/x-www-form-urlencoded (as the MCP SDK sends it)", async () => {
+    const { verifier, challenge } = generatePkce();
+    const { serverCode } = await doAuthorizeAndCallback(challenge);
+
+    // Build a form-encoded body exactly as the MCP SDK's executeTokenRequest does
+    const params = new URLSearchParams({
+      grant_type: "authorization_code",
+      code: serverCode,
+      redirect_uri: MCP_REDIRECT_URI,
+      code_verifier: verifier,
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/oauth/token",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: params.toString(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(typeof body.access_token).toBe("string");
+    expect(body.token_type).toBe("Bearer");
   });
 
   it("full flow: authorize → callback → POST /oauth/token → bearer token works on /mcp", async () => {
