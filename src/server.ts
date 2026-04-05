@@ -43,6 +43,23 @@ export async function buildApp() {
     },
   });
 
+  // ─── Content-type parsers ────────────────────────────────────────────────────
+
+  // The MCP SDK sends POST /oauth/token with Content-Type: application/x-www-form-urlencoded
+  // (per OAuth 2.1 §4.1.3). Fastify only parses application/json by default, so without
+  // this parser request.body would be null and every token exchange would return 400.
+  app.addContentTypeParser(
+    "application/x-www-form-urlencoded",
+    { parseAs: "string" },
+    (_req, body, done) => {
+      try {
+        done(null, Object.fromEntries(new URLSearchParams(body as string)));
+      } catch (err) {
+        done(err as Error, undefined);
+      }
+    }
+  );
+
   // ─── Plugins ────────────────────────────────────────────────────────────────
 
   await app.register(cors, {

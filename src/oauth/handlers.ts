@@ -6,6 +6,7 @@
  * Routes:
  *   GET  /oauth/authorize  — Initiates the flow; redirects the user to Google.
  *   GET  /oauth/callback   — Receives the Google authorization code from Google.
+ *   POST /oauth/register   — RFC 7591 dynamic client registration.
  *   POST /oauth/token      — MCP client exchanges server-issued code for bearer token.
  *
  * Two flows are supported:
@@ -265,8 +266,14 @@ export async function registerOAuthRoutes(app: FastifyInstance): Promise<void> {
    * authorize and token endpoints already accept client_id without checking it —
    * so this endpoint only needs to satisfy the SDK's schema requirements.
    */
-  app.post("/oauth/register", async (_request, reply) => {
+  app.post("/oauth/register", async (request, reply) => {
+    // Echo back whatever metadata the client sent — RFC 7591 requires the response to
+    // include all registered metadata fields (e.g. redirect_uris) alongside the
+    // generated client_id.  The MCP SDK parses the response with a schema that
+    // requires redirect_uris, so omitting it causes a parse error on the client side.
+    const body = (request.body ?? {}) as Record<string, unknown>;
     return reply.status(201).send({
+      ...body,
       client_id: randomUUID(),
       client_id_issued_at: Math.floor(Date.now() / 1000),
     });
@@ -281,12 +288,19 @@ export async function registerOAuthRoutes(app: FastifyInstance): Promise<void> {
    * must prove possession of the original PKCE code_verifier. Returns a standard
    * OAuth 2.0 token response.
    *
-   * Accepts: application/json body with:
+   * Accepts: application/json OR application/x-www-form-urlencoded body
+   * (the MCP SDK sends form-encoded per OAuth 2.1 §4.1.3; both are parsed by server.ts).
+   *
+   * For grant_type=authorization_code:
    *   grant_type    — must be "authorization_code"
    *   code          — server-issued code from the callback redirect
    *   redirect_uri  — must match the one used in /oauth/authorize
    *   code_verifier — PKCE verifier (SHA256 must equal stored code_challenge)
    *   client_id     — MCP client identifier (accepted but not validated)
+   *
+   * For grant_type=refresh_token:
+   *   grant_type    — must be "refresh_token"
+   *   refresh_token — previously issued refresh token
    */
   app.post<{
     Body: {
