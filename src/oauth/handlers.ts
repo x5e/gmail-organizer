@@ -6,6 +6,7 @@
  * Routes:
  *   GET  /oauth/authorize  — Initiates the flow; redirects the user to Google.
  *   GET  /oauth/callback   — Receives the Google authorization code from Google.
+ *   POST /oauth/register   — RFC 7591 dynamic client registration.
  *   POST /oauth/token      — MCP client exchanges server-issued code for bearer token.
  *
  * Two flows are supported:
@@ -287,12 +288,19 @@ export async function registerOAuthRoutes(app: FastifyInstance): Promise<void> {
    * must prove possession of the original PKCE code_verifier. Returns a standard
    * OAuth 2.0 token response.
    *
-   * Accepts: application/json body with:
+   * Accepts: application/json OR application/x-www-form-urlencoded body
+   * (the MCP SDK sends form-encoded per OAuth 2.1 §4.1.3; both are parsed by server.ts).
+   *
+   * For grant_type=authorization_code:
    *   grant_type    — must be "authorization_code"
    *   code          — server-issued code from the callback redirect
    *   redirect_uri  — must match the one used in /oauth/authorize
    *   code_verifier — PKCE verifier (SHA256 must equal stored code_challenge)
    *   client_id     — MCP client identifier (accepted but not validated)
+   *
+   * For grant_type=refresh_token:
+   *   grant_type    — must be "refresh_token"
+   *   refresh_token — previously issued refresh token
    */
   app.post<{
     Body: {
