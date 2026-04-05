@@ -101,8 +101,47 @@ async function callTool(
   return sendMcpRequest(bearerToken, "tools/call", { name: toolName, arguments: params });
 }
 
+describe("GET /.well-known/oauth-protected-resource", () => {
+  it("returns RFC 9728 protected resource metadata", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/.well-known/oauth-protected-resource",
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("application/json");
+    const body = JSON.parse(response.body);
+    // resource is the server root, not the /mcp path (see RFC 9728 §4 path-scoping rules)
+    expect(body.resource).toMatch(/^https?:\/\//);
+    expect(body.resource).not.toMatch(/\/mcp$/);
+    expect(body.authorization_servers).toBeInstanceOf(Array);
+    expect(body.authorization_servers).toHaveLength(1);
+    expect(body.scopes_supported).toEqual(["gmail:read", "gmail:modify"]);
+    expect(body.bearer_methods_supported).toEqual(["header"]);
+  });
+});
+
+describe("CORS", () => {
+  it("exposes WWW-Authenticate header on cross-origin 401 responses", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        Origin: "https://claude.ai",
+      },
+      payload: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+    });
+    expect(response.statusCode).toBe(401);
+    // access-control-expose-headers must list WWW-Authenticate so that
+    // browser-based MCP clients can read it from a cross-origin response.
+    const exposed = response.headers["access-control-expose-headers"] ?? "";
+    expect(exposed.toLowerCase()).toContain("www-authenticate");
+  });
+});
+
 describe("POST /mcp authorization", () => {
-  it("returns 401 when Authorization header is missing", async () => {
+  it("returns 401 with WWW-Authenticate when Authorization header is missing", async () => {
     const response = await app.inject({
       method: "POST",
       url: "/mcp",
@@ -113,9 +152,12 @@ describe("POST /mcp authorization", () => {
       payload: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
     });
     expect(response.statusCode).toBe(401);
+    expect(response.headers["www-authenticate"]).toMatch(
+      /^Bearer resource_metadata=".*\/.well-known\/oauth-protected-resource"$/
+    );
   });
 
-  it("returns 401 when Authorization header has wrong format", async () => {
+  it("returns 401 with WWW-Authenticate when Authorization header has wrong format", async () => {
     const response = await app.inject({
       method: "POST",
       url: "/mcp",
@@ -127,6 +169,9 @@ describe("POST /mcp authorization", () => {
       payload: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
     });
     expect(response.statusCode).toBe(401);
+    expect(response.headers["www-authenticate"]).toMatch(
+      /^Bearer resource_metadata=".*\/.well-known\/oauth-protected-resource"$/
+    );
   });
 });
 
@@ -159,7 +204,7 @@ describe("list_labels tool", () => {
     expect(body.result?.content?.[0]?.text).toContain("INBOX");
   });
 
-  it("returns 401 for invalid bearer token", async () => {
+  it("returns 401 with WWW-Authenticate for invalid bearer token", async () => {
     const response = await app.inject({
       method: "POST",
       url: "/mcp",
@@ -171,9 +216,12 @@ describe("list_labels tool", () => {
       payload: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
     });
     expect(response.statusCode).toBe(401);
+    expect(response.headers["www-authenticate"]).toMatch(
+      /^Bearer resource_metadata=".*\/.well-known\/oauth-protected-resource"$/
+    );
   });
 
-  it("returns 401 for a revoked bearer token", async () => {
+  it("returns 401 with WWW-Authenticate for a revoked bearer token", async () => {
     const { bearerToken } = await createTestUserWithTokens(db);
     const tokenHash = hashToken(bearerToken);
 
@@ -190,6 +238,9 @@ describe("list_labels tool", () => {
       payload: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
     });
     expect(response.statusCode).toBe(401);
+    expect(response.headers["www-authenticate"]).toMatch(
+      /^Bearer resource_metadata=".*\/.well-known\/oauth-protected-resource"$/
+    );
   });
 });
 

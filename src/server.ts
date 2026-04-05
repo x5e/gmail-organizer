@@ -50,6 +50,9 @@ export async function buildApp() {
     // Defaults to allowing all origins; set to your MCP client's domain in production.
     origin: process.env["ALLOWED_ORIGIN"] ?? true,
     methods: ["GET", "POST", "OPTIONS"],
+    // Expose WWW-Authenticate so browser-based MCP clients can read the header
+    // from a cross-origin 401 response and follow the OAuth discovery chain.
+    exposedHeaders: ["WWW-Authenticate"],
   });
 
   await app.register(rateLimit, {
@@ -79,6 +82,28 @@ export async function buildApp() {
   app.get("/health", async () => ({
     status: "ok",
     timestamp: new Date().toISOString(),
+  }));
+
+  /**
+   * GET /.well-known/oauth-protected-resource — RFC 9728 Protected Resource Metadata.
+   *
+   * The canonical resource is the server root (config.baseUrl), NOT /mcp.
+   * RFC 9728 §4 constructs the well-known URL by inserting
+   * "/.well-known/oauth-protected-resource" before the resource path, so:
+   *   resource = https://example.com        → /.well-known/oauth-protected-resource
+   *   resource = https://example.com/mcp   → /.well-known/oauth-protected-resource/mcp
+   * Advertising /mcp as the resource while serving metadata at the root well-known
+   * URL is inconsistent and may fail strict clients.
+   *
+   * NOTE: authorization_servers points to this same origin. Clients that follow
+   * that URL to the next discovery step (RFC 8414 /.well-known/oauth-authorization-server)
+   * will currently receive a 404 until Issue 2 is implemented.
+   */
+  app.get("/.well-known/oauth-protected-resource", async () => ({
+    resource: config.baseUrl,
+    authorization_servers: [config.baseUrl],
+    scopes_supported: ["gmail:read", "gmail:modify"],
+    bearer_methods_supported: ["header"],
   }));
 
   await registerOAuthRoutes(app);
