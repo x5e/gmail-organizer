@@ -78,6 +78,16 @@ export async function buildApp() {
     await handleMcpRequest(request, reply);
   });
 
+  /** GET /mcp — SSE stream for server-initiated messages (MCP Streamable HTTP spec). */
+  app.get("/mcp", async (request, reply) => {
+    await handleMcpRequest(request, reply);
+  });
+
+  /** DELETE /mcp — Session termination (MCP Streamable HTTP spec). */
+  app.delete("/mcp", async (request, reply) => {
+    await handleMcpRequest(request, reply);
+  });
+
   /** GET /health — Health check. */
   app.get("/health", async () => ({
     status: "ok",

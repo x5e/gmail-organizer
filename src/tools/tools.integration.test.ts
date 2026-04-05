@@ -140,6 +140,60 @@ describe("CORS", () => {
   });
 });
 
+describe("GET /mcp authorization", () => {
+  it("returns 401 (not 404) with WWW-Authenticate when Authorization header is missing", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/mcp",
+      headers: { Accept: "text/event-stream" },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(response.headers["www-authenticate"]).toMatch(
+      /^Bearer resource_metadata=".*\/.well-known\/oauth-protected-resource"$/
+    );
+  });
+
+  it("returns 401 (not 404) with WWW-Authenticate for an invalid bearer token", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/mcp",
+      headers: {
+        Accept: "text/event-stream",
+        Authorization: "Bearer invalid-token-xyz",
+      },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(response.headers["www-authenticate"]).toMatch(
+      /^Bearer resource_metadata=".*\/.well-known\/oauth-protected-resource"$/
+    );
+  });
+});
+
+describe("DELETE /mcp authorization", () => {
+  it("returns 401 (not 404) with WWW-Authenticate when Authorization header is missing", async () => {
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/mcp",
+    });
+    expect(response.statusCode).toBe(401);
+    expect(response.headers["www-authenticate"]).toMatch(
+      /^Bearer resource_metadata=".*\/.well-known\/oauth-protected-resource"$/
+    );
+  });
+
+  it("returns 401 (not 404) with WWW-Authenticate for an invalid bearer token", async () => {
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/mcp",
+      headers: { Authorization: "Bearer invalid-token-xyz" },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(response.headers["www-authenticate"]).toMatch(
+      /^Bearer resource_metadata=".*\/.well-known\/oauth-protected-resource"$/
+    );
+  });
+});
+
 describe("POST /mcp authorization", () => {
   it("returns 401 with WWW-Authenticate when Authorization header is missing", async () => {
     const response = await app.inject({
