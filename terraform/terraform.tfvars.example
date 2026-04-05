@@ -1,0 +1,19 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is gitignored — never commit secrets.
+
+project_id = "your-gcp-project-id"
+region     = "us-east4"
+
+# --- Phase 1: infrastructure only (first apply) ---
+deploy_app = false
+domain     = "" # Not needed yet
+
+# Database
+db_tier = "db-custom-1-3840"
+db_name = "gmail_organizer"
+db_user = "app"
+
+# --- Phase 2: deploy the app (after pushing image + populating secrets) ---
+# deploy_app     = true
+# domain         = "your-domain.com"
+# cloudrun_image = "us-east4-docker.pkg.dev/your-project/gmail-organizer/server:latest"
